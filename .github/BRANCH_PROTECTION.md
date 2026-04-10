@@ -44,3 +44,4 @@ If your repository UI shows workflow-prefixed names, use:
 6. Confirm branch settings block merges when checks fail.
 7. Trigger `.github/workflows/release-tag.yml` via manual dispatch and verify release creation.
 8. Confirm `.github/workflows/nightly-resilience.yml` is enabled and scheduled.
+9. For smoke tests, add `docs` and `patch` labels to the PR so `label-policy` can pass.
