@@ -1,0 +1,55 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+no-changes-template: "- No notable changes"
+
+categories:
+  - title: "Security"
+    labels:
+      - security
+      - hardening
+  - title: "CI/CD"
+    labels:
+      - ci
+      - github-actions
+  - title: "Backend"
+    labels:
+      - backend
+      - api
+  - title: "Frontend"
+    labels:
+      - frontend
+      - ui
+  - title: "Infrastructure"
+    labels:
+      - infra
+      - ops
+  - title: "Documentation"
+    labels:
+      - docs
+
+exclude-labels:
+  - skip-changelog
+
+version-resolver:
+  major:
+    labels:
+      - major
+  minor:
+    labels:
+      - minor
+  patch:
+    labels:
+      - patch
+      - fix
+      - chore
+  default: patch
+
+template: |
+  ## What Changed
+
+  $CHANGES
+
+  ## Contributors
+
+  $CONTRIBUTORS
