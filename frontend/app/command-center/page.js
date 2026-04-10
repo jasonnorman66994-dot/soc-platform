@@ -28,6 +28,8 @@ export default function CommandCenterPage() {
   const [adminFunnel, setAdminFunnel] = useState(null);
   const [adminWebhookMetrics, setAdminWebhookMetrics] = useState(null);
   const [adminBoardReport, setAdminBoardReport] = useState(null);
+  const [boardWindowDays, setBoardWindowDays] = useState("30");
+  const [boardIncidentLimit, setBoardIncidentLimit] = useState("10");
 
   const authHeaders = useMemo(
     () => ({
@@ -251,9 +253,20 @@ export default function CommandCenterPage() {
     await loadAdminData();
   }
 
+  function buildBoardReportQuery() {
+    const safeWindowDays = Math.max(7, Math.min(Number.parseInt(boardWindowDays || "30", 10) || 30, 180));
+    const safeIncidentLimit = Math.max(3, Math.min(Number.parseInt(boardIncidentLimit || "10", 10) || 10, 50));
+    const query = new URLSearchParams({
+      window_days: String(safeWindowDays),
+      incident_limit: String(safeIncidentLimit),
+    });
+    return { safeWindowDays, safeIncidentLimit, query: query.toString() };
+  }
+
   async function loadBoardReport() {
     if (!adminAccessToken) return;
-    const res = await fetch(`${API}/admin/reports/board`, {
+    const { safeWindowDays, safeIncidentLimit, query } = buildBoardReportQuery();
+    const res = await fetch(`${API}/admin/reports/board?${query}`, {
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
@@ -261,13 +274,16 @@ export default function CommandCenterPage() {
       setAdminError(data?.detail || "Board report load failed");
       return;
     }
+    setBoardWindowDays(String(safeWindowDays));
+    setBoardIncidentLimit(String(safeIncidentLimit));
     setAdminError("");
     setAdminBoardReport(data?.generated_at ? data : null);
   }
 
   async function downloadBoardReport() {
     if (!adminAccessToken) return;
-    const res = await fetch(`${API}/admin/reports/board.md`, {
+    const { safeWindowDays, safeIncidentLimit, query } = buildBoardReportQuery();
+    const res = await fetch(`${API}/admin/reports/board.md?${query}`, {
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const body = await res.text();
@@ -280,12 +296,14 @@ export default function CommandCenterPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "board-report.md";
+    link.download = `board-report-${safeWindowDays}d-${safeIncidentLimit}incidents.md`;
     link.style.display = "none";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setBoardWindowDays(String(safeWindowDays));
+    setBoardIncidentLimit(String(safeIncidentLimit));
     setAdminError("");
   }
 
@@ -369,6 +387,8 @@ export default function CommandCenterPage() {
         <h3 style={h3}>Admin Operations Panel</h3>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8 }}>
           <input style={input} placeholder="Internal admin token" value={adminTokenInput} onChange={(e) => setAdminTokenInput(e.target.value)} />
+          <input style={input} type="number" min="7" max="180" placeholder="Board window days (7-180)" value={boardWindowDays} onChange={(e) => setBoardWindowDays(e.target.value)} />
+          <input style={input} type="number" min="3" max="50" placeholder="Incident limit (3-50)" value={boardIncidentLimit} onChange={(e) => setBoardIncidentLimit(e.target.value)} />
           <button style={btn} onClick={createAdminSession}>Create Admin Session</button>
           <button style={btnSecondary} onClick={refreshAdminSession}>Refresh Admin Session</button>
           <button style={btnSecondary} onClick={revokeAdminSession}>Revoke Admin Session</button>

@@ -216,6 +216,11 @@ Board report query parameters:
 - `window_days`: rolling lookback window for incident/webhook metrics (default `30`)
 - `incident_limit`: number of recent incidents to include (default `10`)
 
+Command Center support:
+
+- Admin Operations Panel now includes `Board window days` and `Incident limit` inputs.
+- `Load Board Report` and `Download Board Report` use these values and clamp to safe ranges.
+
 ## Founder Assets
 
 - Pitch deck narrative: `founder/PITCH_DECK.md`
