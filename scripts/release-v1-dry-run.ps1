@@ -19,13 +19,13 @@ function Assert-VersionFormat {
 function Test-GitTagExists {
   param([string]$TagName)
 
-  cmd /c "git rev-parse --is-inside-work-tree >NUL 2>NUL"
+  $null = git rev-parse --is-inside-work-tree 2>&1
   if ($LASTEXITCODE -ne 0) {
     Write-Host "git repository not detected here; skipping local tag-exists check"
     return $false
   }
 
-  cmd /c "git rev-parse $TagName >NUL 2>NUL"
+  $null = git rev-parse $TagName 2>&1
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -33,13 +33,13 @@ Write-Host "[1/5] Validating release tag format"
 Assert-VersionFormat -VersionValue $Version
 
 Write-Host "[2/5] Validating local quick checks"
-powershell -ExecutionPolicy Bypass -File .\scripts\quick-check.ps1
+pwsh -ExecutionPolicy Bypass -File .\scripts\quick-check.ps1
 if ($LASTEXITCODE -ne 0) {
   throw "quick-check failed"
 }
 
 Write-Host "[3/5] Running full preflight"
-powershell -ExecutionPolicy Bypass -File .\scripts\preflight-release.ps1 -BaseUrl $BaseUrl
+pwsh -ExecutionPolicy Bypass -File .\scripts\preflight-release.ps1 -BaseUrl $BaseUrl
 if ($LASTEXITCODE -ne 0) {
   throw "preflight-release failed"
 }

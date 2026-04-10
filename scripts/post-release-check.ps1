@@ -9,7 +9,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
 Write-Host "[1/4] Running fast structural checks"
-powershell -ExecutionPolicy Bypass -File .\scripts\quick-check.ps1
+pwsh -ExecutionPolicy Bypass -File .\scripts\quick-check.ps1
 if ($LASTEXITCODE -ne 0) {
   throw "quick-check failed"
 }
@@ -17,13 +17,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[2/4] Running release verification gate"
 $verifyArgs = @(
   "-ExecutionPolicy", "Bypass",
-  "-File", ".\\scripts\\release-verify-ci.ps1",
+  "-File", ".\scripts\release-verify-ci.ps1",
   "-BaseUrl", $BaseUrl
 )
 if ($AdminToken) {
   $verifyArgs += @("-AdminToken", $AdminToken)
 }
-powershell @verifyArgs
+pwsh @verifyArgs
 if ($LASTEXITCODE -ne 0) {
   throw "release-verify-ci failed"
 }

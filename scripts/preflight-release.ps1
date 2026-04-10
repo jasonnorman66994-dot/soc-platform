@@ -9,7 +9,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
 Write-Host "[1/4] Creating rollback checkpoint"
-powershell -ExecutionPolicy Bypass -File .\scripts\rollback.ps1 -Action checkpoint
+pwsh -ExecutionPolicy Bypass -File .\scripts\rollback.ps1 -Action checkpoint
 if ($LASTEXITCODE -ne 0) {
   throw "rollback checkpoint failed"
 }
@@ -17,13 +17,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[2/4] Running release CI verification"
 $verifyArgs = @(
   "-ExecutionPolicy", "Bypass",
-  "-File", ".\\scripts\\release-verify-ci.ps1",
+  "-File", ".\scripts\release-verify-ci.ps1",
   "-BaseUrl", $BaseUrl
 )
 if ($AdminToken) {
   $verifyArgs += @("-AdminToken", $AdminToken)
 }
-powershell @verifyArgs
+pwsh @verifyArgs
 if ($LASTEXITCODE -ne 0) {
   throw "release verification failed"
 }
@@ -31,13 +31,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[3/4] Running demo-day scenario"
 $demoArgs = @(
   "-ExecutionPolicy", "Bypass",
-  "-File", ".\\scripts\\demo-day.ps1",
+  "-File", ".\scripts\demo-day.ps1",
   "-BaseUrl", $BaseUrl
 )
 if ($AdminToken) {
   $demoArgs += @("-AdminToken", $AdminToken)
 }
-powershell @demoArgs
+pwsh @demoArgs
 if ($LASTEXITCODE -ne 0) {
   throw "demo-day flow failed"
 }

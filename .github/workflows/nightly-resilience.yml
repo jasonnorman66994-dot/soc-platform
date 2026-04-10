@@ -42,15 +42,15 @@ jobs:
 
       - name: Run quick checks
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File ./scripts/quick-check.ps1
+        run: ./scripts/quick-check.ps1
 
       - name: Run release verify gate
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File ./scripts/release-verify-ci.ps1
+        run: ./scripts/release-verify-ci.ps1
 
       - name: Run full preflight
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File ./scripts/preflight-release.ps1
+        run: ./scripts/preflight-release.ps1
 
       - name: Capture runtime diagnostics
         if: always()

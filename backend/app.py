@@ -167,7 +167,7 @@ def evaluate_security_posture() -> list[str]:
         warnings.append("JWT_SECRET uses insecure default")
     if os.getenv("INTERNAL_ADMIN_TOKEN", "dev-admin-token") == "dev-admin-token":
         warnings.append("INTERNAL_ADMIN_TOKEN uses insecure default")
-    if os.getenv("ALLOW_INSECURE_HTTP", "true").lower() == "true":
+    if os.getenv("ALLOW_INSECURE_HTTP", "false").lower() == "true":
         warnings.append("ALLOW_INSECURE_HTTP=true")
     return warnings
 
@@ -613,7 +613,7 @@ def rate_limit_key(request: Request) -> str:
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     enforce_https = os.getenv("ENFORCE_HTTPS", "false").lower() == "true"
-    allow_insecure = os.getenv("ALLOW_INSECURE_HTTP", "true").lower() == "true"
+    allow_insecure = os.getenv("ALLOW_INSECURE_HTTP", "false").lower() == "true"
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     if enforce_https and not allow_insecure and proto != "https":
         raise HTTPException(status_code=400, detail="HTTPS required")

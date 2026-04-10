@@ -50,7 +50,7 @@ jobs:
 
       - name: Run release verify gate
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File ./scripts/release-verify-ci.ps1
+        run: ./scripts/release-verify-ci.ps1
 
       - name: Teardown
         if: always()
