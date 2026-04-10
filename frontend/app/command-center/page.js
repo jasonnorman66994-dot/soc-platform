@@ -281,8 +281,11 @@ export default function CommandCenterPage() {
     const link = document.createElement("a");
     link.href = url;
     link.download = "board-report.md";
+    link.style.display = "none";
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     setAdminError("");
   }
 

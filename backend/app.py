@@ -1393,15 +1393,20 @@ def build_board_report(window_days: int = 30, incident_limit: int = 10) -> dict:
 
             cur.execute(
                 """
-                SELECT
-                  AVG(EXTRACT(EPOCH FROM (a.detected_at - e.timestamp))) AS mttd,
-                  AVG(EXTRACT(EPOCH FROM (i.responded_at - i.detected_at))) AS mttr
-                FROM incidents i
-                LEFT JOIN alerts a ON a.tenant_id = i.tenant_id
-                LEFT JOIN events e ON e.id = a.event_id
-                WHERE i.detected_at >= NOW() - (%s * INTERVAL '1 day')
+                                SELECT
+                                    (
+                                        SELECT AVG(EXTRACT(EPOCH FROM (a.detected_at - e.timestamp)))
+                                        FROM alerts a
+                                        LEFT JOIN events e ON e.id = a.event_id
+                                        WHERE a.detected_at >= NOW() - (%s * INTERVAL '1 day')
+                                    ) AS mttd,
+                                    (
+                                        SELECT AVG(EXTRACT(EPOCH FROM (i.responded_at - i.detected_at)))
+                                        FROM incidents i
+                                        WHERE i.detected_at >= NOW() - (%s * INTERVAL '1 day')
+                                    ) AS mttr
                 """,
-                (safe_window_days,),
+                                (safe_window_days, safe_window_days),
             )
             response_metrics = cur.fetchone()
 
@@ -1496,8 +1501,8 @@ def get_board_report_markdown(window_days: int = 30, incident_limit: int = 10, _
     incidents = report["incident_summary"]
     tenants = report["tenant_summary"]
     commercial = report["commercial_summary"]
-    webhook_lines = report["webhook_summary_last_window"][:5]
-    recent_lines = report["recent_incidents"][:5]
+    webhook_lines = report["webhook_summary_last_window"]
+    recent_lines = report["recent_incidents"]
 
     markdown = [
         "# Board Report",
