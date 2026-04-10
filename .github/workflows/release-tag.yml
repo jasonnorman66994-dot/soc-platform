@@ -25,6 +25,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Run quick release checks
+        shell: pwsh
+        run: ./scripts/quick-check.ps1
+
       - name: Validate version format
         shell: bash
         run: |
@@ -36,7 +40,8 @@ jobs:
       - name: Ensure tag does not already exist
         shell: bash
         run: |
-          if git rev-parse "${{ github.event.inputs.version }}" >/dev/null 2>&1; then
+          git fetch --tags origin
+          if git ls-remote --tags origin "refs/tags/${{ github.event.inputs.version }}" | grep -q .; then
             echo "Tag already exists: ${{ github.event.inputs.version }}"
             exit 1
           fi
@@ -46,7 +51,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ github.event.inputs.version }}"
+          git tag -a "${{ github.event.inputs.version }}" -m "Release ${{ github.event.inputs.version }}"
           git push origin "${{ github.event.inputs.version }}"
 
       - name: Create GitHub release
