@@ -9,6 +9,7 @@ on:
       - "docker-compose.yml"
       - "scripts/**"
       - ".env.example"
+        - ".github/**"
       - ".github/workflows/pr-quick-check.yml"
       - ".github/workflows/release-verify.yml"
   workflow_dispatch:
