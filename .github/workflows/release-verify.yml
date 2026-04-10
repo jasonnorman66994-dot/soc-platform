@@ -1,0 +1,57 @@
+name: Release Verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "nginx/**"
+      - "docker-compose.yml"
+      - "scripts/**"
+      - ".github/workflows/release-verify.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare environment file
+        shell: bash
+        run: |
+          if [ -f .env ]; then
+            echo ".env already present"
+          else
+            cp .env.example .env
+          fi
+
+      - name: Start stack
+        run: docker compose up -d --build
+
+      - name: Wait for API
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost/api/health >/dev/null; then
+              echo "API ready"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "API failed to become ready"
+          exit 1
+
+      - name: Run release verify gate
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File ./scripts/release-verify-ci.ps1
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v

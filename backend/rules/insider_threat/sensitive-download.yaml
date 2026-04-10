@@ -1,0 +1,11 @@
+id: INSIDER-DL-001
+title: Sensitive Download Sequence
+author: SOC Team
+source: insider_threat
+severity: high
+confidence: 80
+mitre: T1530
+summary: Sensitive download may indicate insider threat staging
+match:
+  event_types:
+    - file_download

@@ -1,0 +1,33 @@
+name: PR Quick Check
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "nginx/**"
+      - "docker-compose.yml"
+      - "scripts/**"
+      - ".github/workflows/pr-quick-check.yml"
+      - ".github/workflows/release-verify.yml"
+  workflow_dispatch:
+
+jobs:
+  quick-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare environment file
+        shell: bash
+        run: |
+          if [ -f .env ]; then
+            echo ".env already present"
+          else
+            cp .env.example .env
+          fi
+
+      - name: Run quick validation
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File ./scripts/quick-check.ps1

@@ -1,0 +1,11 @@
+id: PHISH-URGENT-001
+title: Urgent External Sender Pattern
+author: SOC Team
+source: phishing
+severity: high
+confidence: 82
+mitre: T1566.001
+summary: Urgent email from an untrusted sender domain
+match:
+  event_types:
+    - email

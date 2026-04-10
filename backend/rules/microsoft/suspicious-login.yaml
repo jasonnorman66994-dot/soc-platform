@@ -1,0 +1,12 @@
+id: MSFT-LOGIN-001
+title: Suspicious Login Geography Shift
+author: SOC Team
+source: microsoft
+severity: high
+confidence: 88
+mitre: T1078
+summary: Login originated from an unusual geo transition
+match:
+  event_types:
+    - login_anomaly
+  geo_mismatch: true
