@@ -7,12 +7,14 @@ This document defines recommended repository protection settings for `main`.
 Enable "Require status checks to pass before merging" and add these checks:
 
 - `quick-check`
-- `verify`
+- `label-policy`
 
 If your repository UI shows workflow-prefixed names, use:
 
 - `PR Quick Check / quick-check`
-- `Release Verify / verify`
+- `PR Label Policy / label-policy`
+
+`verify` remains a post-merge release gate on `main` and should stay enabled in Actions, but it is not a pre-merge PR status check.
 
 ## Recommended Main Branch Rules
 
@@ -36,8 +38,9 @@ If your repository UI shows workflow-prefixed names, use:
 
 1. Open a test pull request that touches `scripts/quick-check.ps1`.
 2. Confirm the PR check `quick-check` runs and passes.
-3. Merge to `main`.
-4. Confirm `verify` runs on `main` and passes.
-5. Confirm branch settings block merges when checks fail.
-6. Trigger `.github/workflows/release-tag.yml` via manual dispatch and verify release creation.
-7. Confirm `.github/workflows/nightly-resilience.yml` is enabled and scheduled.
+3. Confirm the PR check `label-policy` runs and passes.
+4. Merge to `main`.
+5. Confirm `verify` runs on `main` and passes.
+6. Confirm branch settings block merges when checks fail.
+7. Trigger `.github/workflows/release-tag.yml` via manual dispatch and verify release creation.
+8. Confirm `.github/workflows/nightly-resilience.yml` is enabled and scheduled.
