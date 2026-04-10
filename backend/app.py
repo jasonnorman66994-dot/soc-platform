@@ -1359,6 +1359,201 @@ def get_audit_logs(tenant_id: str = Depends(get_tenant), _user=Depends(require_a
             return cur.fetchall()
 
 
+def build_board_report(window_days: int = 30, incident_limit: int = 10) -> dict:
+    safe_window_days = max(7, min(window_days, 180))
+    safe_incident_limit = max(3, min(incident_limit, 50))
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  COUNT(*) AS total_tenants,
+                  SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_tenants,
+                  SUM(CASE WHEN status = 'trialing' THEN 1 ELSE 0 END) AS trialing_tenants,
+                  SUM(CASE WHEN status = 'past_due' THEN 1 ELSE 0 END) AS past_due_tenants
+                FROM tenants
+                """
+            )
+            tenant_summary = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT
+                  COUNT(*) AS total_incidents,
+                  SUM(CASE WHEN status <> 'resolved' THEN 1 ELSE 0 END) AS open_incidents,
+                  SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical_incidents,
+                  SUM(CASE WHEN severity = 'high' THEN 1 ELSE 0 END) AS high_incidents
+                FROM incidents
+                WHERE detected_at >= NOW() - (%s * INTERVAL '1 day')
+                """,
+                (safe_window_days,),
+            )
+            incident_summary = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT
+                  AVG(EXTRACT(EPOCH FROM (a.detected_at - e.timestamp))) AS mttd,
+                  AVG(EXTRACT(EPOCH FROM (i.responded_at - i.detected_at))) AS mttr
+                FROM incidents i
+                LEFT JOIN alerts a ON a.tenant_id = i.tenant_id
+                LEFT JOIN events e ON e.id = a.event_id
+                WHERE i.detected_at >= NOW() - (%s * INTERVAL '1 day')
+                """,
+                (safe_window_days,),
+            )
+            response_metrics = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT source, COUNT(*) AS count,
+                       SUM(CASE WHEN converted_to_signup THEN 1 ELSE 0 END) AS converted
+                FROM lead_captures
+                GROUP BY source
+                ORDER BY count DESC
+                """
+            )
+            leads_by_source = cur.fetchall()
+
+            cur.execute("SELECT COUNT(*) AS total FROM lead_captures")
+            total_leads = cur.fetchone()["total"]
+
+            cur.execute("SELECT COUNT(*) AS converted FROM lead_captures WHERE converted_to_signup=TRUE")
+            converted_leads = cur.fetchone()["converted"]
+
+            cur.execute(
+                """
+                SELECT status, COALESCE(reason, '') AS reason, COUNT(*) AS count
+                FROM webhook_metrics
+                WHERE created_at >= NOW() - (%s * INTERVAL '1 day')
+                GROUP BY status, reason
+                ORDER BY count DESC
+                """,
+                (safe_window_days,),
+            )
+            webhook_summary = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT tenant_id, entity, severity, status, assigned_to, detected_at
+                FROM incidents
+                WHERE detected_at >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY detected_at DESC
+                LIMIT %s
+                """,
+                (safe_window_days, safe_incident_limit),
+            )
+            recent_incidents = cur.fetchall()
+
+    conversion_rate = (float(converted_leads) / float(total_leads)) if total_leads else 0.0
+    return {
+        "generated_at": now_utc().isoformat(),
+        "window_days": safe_window_days,
+        "tenant_summary": {
+            "total_tenants": tenant_summary["total_tenants"] or 0,
+            "active_tenants": tenant_summary["active_tenants"] or 0,
+            "trialing_tenants": tenant_summary["trialing_tenants"] or 0,
+            "past_due_tenants": tenant_summary["past_due_tenants"] or 0,
+        },
+        "incident_summary": {
+            "total_incidents": incident_summary["total_incidents"] or 0,
+            "open_incidents": incident_summary["open_incidents"] or 0,
+            "critical_incidents": incident_summary["critical_incidents"] or 0,
+            "high_incidents": incident_summary["high_incidents"] or 0,
+            "mttd_seconds": float(response_metrics["mttd"] or 0),
+            "mttr_seconds": float(response_metrics["mttr"] or 0),
+        },
+        "commercial_summary": {
+            "total_leads": total_leads,
+            "converted_signups": converted_leads,
+            "conversion_rate": conversion_rate,
+            "by_source": leads_by_source,
+        },
+        "webhook_summary_last_window": webhook_summary,
+        "recent_incidents": [
+            {
+                "tenant_id": row["tenant_id"],
+                "entity": row["entity"],
+                "severity": row["severity"],
+                "status": row["status"],
+                "assigned_to": row.get("assigned_to"),
+                "detected_at": row["detected_at"].isoformat() if row.get("detected_at") else None,
+            }
+            for row in recent_incidents
+        ],
+    }
+
+
+@app.get("/admin/reports/board")
+def get_board_report(window_days: int = 30, incident_limit: int = 10, _admin=Depends(require_internal_admin_token)):
+    return build_board_report(window_days=window_days, incident_limit=incident_limit)
+
+
+@app.get("/admin/reports/board.md")
+def get_board_report_markdown(window_days: int = 30, incident_limit: int = 10, _admin=Depends(require_internal_admin_token)):
+    report = build_board_report(window_days=window_days, incident_limit=incident_limit)
+    incidents = report["incident_summary"]
+    tenants = report["tenant_summary"]
+    commercial = report["commercial_summary"]
+    webhook_lines = report["webhook_summary_last_window"][:5]
+    recent_lines = report["recent_incidents"][:5]
+
+    markdown = [
+        "# Board Report",
+        "",
+        f"Generated: {report['generated_at']}",
+        f"Window: last {report['window_days']} days",
+        "",
+        "## Platform KPIs",
+        f"- Total tenants: {tenants['total_tenants']}",
+        f"- Active tenants: {tenants['active_tenants']}",
+        f"- Trialing tenants: {tenants['trialing_tenants']}",
+        f"- Past due tenants: {tenants['past_due_tenants']}",
+        "",
+        "## Security Operations",
+        f"- Total incidents: {incidents['total_incidents']}",
+        f"- Open incidents: {incidents['open_incidents']}",
+        f"- Critical incidents: {incidents['critical_incidents']}",
+        f"- High incidents: {incidents['high_incidents']}",
+        f"- MTTD seconds: {incidents['mttd_seconds']:.2f}",
+        f"- MTTR seconds: {incidents['mttr_seconds']:.2f}",
+        "",
+        "## Commercial Funnel",
+        f"- Total leads: {commercial['total_leads']}",
+        f"- Converted signups: {commercial['converted_signups']}",
+        f"- Conversion rate: {commercial['conversion_rate']:.2%}",
+        "",
+        "## Top Lead Sources",
+    ]
+
+    for row in commercial["by_source"][:5]:
+        markdown.append(f"- {row['source']}: {row['count']} leads / {row['converted'] or 0} converted")
+
+    markdown.extend(["", "## Webhook Health"])
+    if webhook_lines:
+        for row in webhook_lines:
+            reason = f" ({row['reason']})" if row.get("reason") else ""
+            markdown.append(f"- {row['status']}{reason}: {row['count']}")
+    else:
+        markdown.append("- No webhook activity recorded in this window")
+
+    markdown.extend(["", "## Recent Incidents"])
+    if recent_lines:
+        for row in recent_lines:
+            markdown.append(
+                f"- [{row['severity']}/{row['status']}] {row['tenant_id']} :: {row['entity']} :: assigned to {row['assigned_to'] or 'unassigned'}"
+            )
+    else:
+        markdown.append("- No incidents recorded in this window")
+
+    return PlainTextResponse(
+        content="\n".join(markdown) + "\n",
+        media_type="text/markdown",
+        headers={"Content-Disposition": 'attachment; filename="board-report.md"'},
+    )
+
+
 @app.get("/admin/leads")
 def get_leads(limit: int = 200, _admin=Depends(require_internal_admin_token)):
     safe_limit = max(1, min(limit, 2000))

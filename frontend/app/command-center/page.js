@@ -27,6 +27,7 @@ export default function CommandCenterPage() {
   const [adminLeads, setAdminLeads] = useState([]);
   const [adminFunnel, setAdminFunnel] = useState(null);
   const [adminWebhookMetrics, setAdminWebhookMetrics] = useState(null);
+  const [adminBoardReport, setAdminBoardReport] = useState(null);
 
   const authHeaders = useMemo(
     () => ({
@@ -250,6 +251,41 @@ export default function CommandCenterPage() {
     await loadAdminData();
   }
 
+  async function loadBoardReport() {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/board`, {
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Board report load failed");
+      return;
+    }
+    setAdminError("");
+    setAdminBoardReport(data?.generated_at ? data : null);
+  }
+
+  async function downloadBoardReport() {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/board.md`, {
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const body = await res.text();
+    if (!res.ok) {
+      setAdminError(body || "Board report download failed");
+      return;
+    }
+
+    const blob = new Blob([body], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "board-report.md";
+    link.click();
+    URL.revokeObjectURL(url);
+    setAdminError("");
+  }
+
   return (
     <main style={{ minHeight: "100vh", padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -334,6 +370,8 @@ export default function CommandCenterPage() {
           <button style={btnSecondary} onClick={refreshAdminSession}>Refresh Admin Session</button>
           <button style={btnSecondary} onClick={revokeAdminSession}>Revoke Admin Session</button>
           <button style={btn} onClick={loadAdminData}>Load Admin Analytics</button>
+          <button style={btn} onClick={loadBoardReport}>Load Board Report</button>
+          <button style={btnSecondary} onClick={downloadBoardReport}>Download Board Report</button>
           <button style={btnSecondary} onClick={cleanupReplayFingerprints}>Cleanup Replay Fingerprints</button>
         </div>
         {adminError ? <p style={{ color: "#f87171", marginBottom: 0 }}>{adminError}</p> : null}
@@ -343,6 +381,18 @@ export default function CommandCenterPage() {
           <div style={miniCard}><div style={miniTitle}>Converted Signups</div><div>{adminFunnel?.converted_signups ?? "-"}</div></div>
           <div style={miniCard}><div style={miniTitle}>Conversion Rate</div><div>{adminFunnel ? `${Math.round((adminFunnel.conversion_rate || 0) * 100)}%` : "-"}</div></div>
           <div style={miniCard}><div style={miniTitle}>Webhook Summary Rows</div><div>{(adminWebhookMetrics?.summary_last_7_days || []).length}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Board Report Window</div><div>{adminBoardReport?.window_days ? `${adminBoardReport.window_days}d` : "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Board Open Incidents</div><div>{adminBoardReport?.incident_summary?.open_incidents ?? "-"}</div></div>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <h4 style={{ margin: 0, color: "#cbd5e1" }}>Board Snapshot</h4>
+          <ul style={list}>
+            <li style={row}><span>Generated At</span><span>{adminBoardReport?.generated_at || "-"}</span></li>
+            <li style={row}><span>Total Tenants</span><span>{adminBoardReport?.tenant_summary?.total_tenants ?? "-"}</span></li>
+            <li style={row}><span>Critical Incidents</span><span>{adminBoardReport?.incident_summary?.critical_incidents ?? "-"}</span></li>
+            <li style={row}><span>Lead Conversion</span><span>{adminBoardReport ? `${Math.round((adminBoardReport.commercial_summary?.conversion_rate || 0) * 100)}%` : "-"}</span></li>
+          </ul>
         </div>
 
         <div style={{ marginTop: 12 }}>
