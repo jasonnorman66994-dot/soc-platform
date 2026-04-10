@@ -208,6 +208,13 @@ Optional signed admin sessions:
 - Funnel conversion metrics: `GET /api/admin/funnel`
 - Tenant conversion breakdown: `GET /api/admin/funnel/tenants`
 - Replay fingerprint cleanup: `POST /api/admin/webhooks/cleanup`
+- Board-ready KPI JSON: `GET /api/admin/reports/board`
+- Downloadable board-ready Markdown report: `GET /api/admin/reports/board.md`
+
+Board report query parameters:
+
+- `window_days`: rolling lookback window for incident/webhook metrics (default `30`)
+- `incident_limit`: number of recent incidents to include (default `10`)
 
 ## Founder Assets
 

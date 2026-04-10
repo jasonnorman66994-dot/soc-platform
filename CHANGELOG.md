@@ -10,6 +10,7 @@
 - Demo automation endpoints for tenant reset and showcase attack sequence.
 - Command Center admin operations panel for session and KPI workflows.
 - Demo-day script for repeatable presentation setup and KPI capture.
+- Board-ready admin report endpoints for KPI JSON and downloadable Markdown summaries.
 
 ### Changed
 
