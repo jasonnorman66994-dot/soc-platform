@@ -14,6 +14,9 @@ on:
       - ".github/workflows/release-verify.yml"
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   quick-check:
     runs-on: ubuntu-latest
