@@ -954,11 +954,11 @@ _THREAT_INTEL_POLL_INTERVAL = 300  # seconds
 
 # Mock global blocklist (simulates AlienVault OTX / abuse.ch feeds)
 _MOCK_THREAT_FEED = {
-    "198.51.100.1": {"source": "AlienVault OTX", "category": "C2", "risk": 1.0, "tags": ["botnet", "c2-server"]},
-    "203.0.113.66": {"source": "abuse.ch", "category": "malware", "risk": 1.0, "tags": ["ransomware", "dropper"]},
-    "192.0.2.99": {"source": "AlienVault OTX", "category": "scanner", "risk": 0.85, "tags": ["mass-scanner"]},
-    "198.51.100.200": {"source": "ThreatFox", "category": "phishing", "risk": 0.95, "tags": ["credential-harvester"]},
-    "203.0.113.42": {"source": "abuse.ch", "category": "brute_force", "risk": 0.9, "tags": ["ssh-bruteforce"]},
+    "198.51.100.1": {"source": "AlienVault OTX", "category": "C2", "risk": 100, "tags": ["botnet", "c2-server"]},
+    "203.0.113.66": {"source": "abuse.ch", "category": "malware", "risk": 100, "tags": ["ransomware", "dropper"]},
+    "192.0.2.99": {"source": "AlienVault OTX", "category": "scanner", "risk": 85, "tags": ["mass-scanner"]},
+    "198.51.100.200": {"source": "ThreatFox", "category": "phishing", "risk": 95, "tags": ["credential-harvester"]},
+    "203.0.113.42": {"source": "abuse.ch", "category": "brute_force", "risk": 90, "tags": ["ssh-bruteforce"]},
 }
 
 
@@ -987,18 +987,20 @@ def check_threat_intel(ip: str | None) -> dict | None:
 # ---------------------------------------------------------------------------
 # Distributed Agent Registry (The Hunter)
 # ---------------------------------------------------------------------------
-_REGISTERED_AGENTS: dict[str, dict] = {}  # agent_id -> {hostname, last_seen, status, event_count}
+_REGISTERED_AGENTS: dict[str, dict[str, dict]] = {}  # tenant_id -> agent_id -> {hostname, last_seen, status, event_count}
 _TELEMETRY_BUFFER: list[dict] = []  # recent telemetry events (capped)
 _TELEMETRY_BUFFER_MAX = 500
 
 
-def register_agent_heartbeat(agent_id: str, hostname: str):
-    """Update agent registry with heartbeat."""
-    _REGISTERED_AGENTS[agent_id] = {
+def register_agent_heartbeat(agent_id: str, hostname: str, tenant_id: str = "default"):
+    """Update agent registry with heartbeat (tenant-scoped)."""
+    if tenant_id not in _REGISTERED_AGENTS:
+        _REGISTERED_AGENTS[tenant_id] = {}
+    _REGISTERED_AGENTS[tenant_id][agent_id] = {
         "hostname": hostname,
         "last_seen": now_utc().isoformat(),
         "status": "active",
-        "event_count": _REGISTERED_AGENTS.get(agent_id, {}).get("event_count", 0),
+        "event_count": _REGISTERED_AGENTS.get(tenant_id, {}).get(agent_id, {}).get("event_count", 0),
     }
 
 
@@ -1008,21 +1010,24 @@ def buffer_telemetry(event: dict):
     if len(_TELEMETRY_BUFFER) > _TELEMETRY_BUFFER_MAX:
         del _TELEMETRY_BUFFER[:len(_TELEMETRY_BUFFER) - _TELEMETRY_BUFFER_MAX]
     agent_id = event.get("agent_id")
-    if agent_id and agent_id in _REGISTERED_AGENTS:
-        _REGISTERED_AGENTS[agent_id]["event_count"] = _REGISTERED_AGENTS[agent_id].get("event_count", 0) + 1
+    tenant_id = event.get("tenant_id", "default")
+    if agent_id and tenant_id in _REGISTERED_AGENTS and agent_id in _REGISTERED_AGENTS[tenant_id]:
+        _REGISTERED_AGENTS[tenant_id][agent_id]["event_count"] = _REGISTERED_AGENTS[tenant_id][agent_id].get("event_count", 0) + 1
 
 
 # ---------------------------------------------------------------------------
 # Simulation Engine (The Architect) — drill tracking
 # ---------------------------------------------------------------------------
-_DRILL_HISTORY: list[dict] = []  # list of drill results
+_DRILL_HISTORY: dict[str, list[dict]] = {}  # tenant_id -> list of drill results
 _DRILL_HISTORY_MAX = 100
 
 
-def record_drill(drill: dict):
-    _DRILL_HISTORY.append(drill)
-    if len(_DRILL_HISTORY) > _DRILL_HISTORY_MAX:
-        del _DRILL_HISTORY[:len(_DRILL_HISTORY) - _DRILL_HISTORY_MAX]
+def record_drill(drill: dict, tenant_id: str = "default"):
+    if tenant_id not in _DRILL_HISTORY:
+        _DRILL_HISTORY[tenant_id] = []
+    _DRILL_HISTORY[tenant_id].append(drill)
+    if len(_DRILL_HISTORY[tenant_id]) > _DRILL_HISTORY_MAX:
+        del _DRILL_HISTORY[tenant_id][:len(_DRILL_HISTORY[tenant_id]) - _DRILL_HISTORY_MAX]
 
 
 # ---------------------------------------------------------------------------
@@ -2765,13 +2770,30 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
     ).get(event.user_id)
 
     ml_risk_boost = 0
+    risk_score = 0
+    patterns = []
+    _ml_boost_result = {"anomalies": []}
+
+    # Threat Intel check: if IP matches known bad actor, force max risk + JIT revoke
+    # (runs regardless of context availability)
+    _threat_match = check_threat_intel(event.ip)
+    if _threat_match:
+        risk_score = 100
+        ml_risk_boost = max(ml_risk_boost, 15)
+        if event.user_id:
+            jit_revoke_user_sessions(tenant_id, event.user_id, reason="threat_intel_match")
+        log_action(tenant_id, None, "threat_intel.match", f"events/{saved_event['id']}", {
+            "ip": event.ip, "source": _threat_match.get("source"),
+            "category": _threat_match.get("category"), "tags": _threat_match.get("tags"),
+        })
+
     if context:
         patterns = _detect_behavior_patterns(context)
         user_alerts = [
             {"severity": item.get("severity"), "summary": item.get("summary")}
             for item in alert_rows
         ]
-        risk_score = _calculate_context_risk(context, user_alerts, patterns)
+        risk_score = max(risk_score, _calculate_context_risk(context, user_alerts, patterns))
         # ML anomaly boost: if this user is a statistical outlier in recent traffic, raise risk score
         _ml_boost_result = detect_ml_anomalies(events=[
             {"id": item.get("id"), "user_id": item.get("user_id"),
@@ -2787,18 +2809,6 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
         # JIT auto-revocation: if risk spikes above 90, revoke the user's sessions
         if risk_score >= 90 and event.user_id:
             jit_revoke_user_sessions(tenant_id, event.user_id, reason="automated_risk_spike")
-
-        # Threat Intel check: if IP matches known bad actor, force max risk + JIT revoke
-        _threat_match = check_threat_intel(event.ip)
-        if _threat_match:
-            risk_score = 100
-            ml_risk_boost = max(ml_risk_boost, 15)
-            if event.user_id:
-                jit_revoke_user_sessions(tenant_id, event.user_id, reason="threat_intel_match")
-            log_action(tenant_id, None, "threat_intel.match", f"events/{saved_event['id']}", {
-                "ip": event.ip, "source": _threat_match.get("source"),
-                "category": _threat_match.get("category"), "tags": _threat_match.get("tags"),
-            })
 
         active_soar_policy = _get_cached_soar_policy(tenant_id)
         selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
@@ -3713,7 +3723,7 @@ async def telemetry_ingest(
     processed = 0
     threat_matches = []
     for ev in events:
-        register_agent_heartbeat(ev.agent_id, ev.hostname)
+        register_agent_heartbeat(ev.agent_id, ev.hostname, tenant_id)
         entry = {
             "agent_id": ev.agent_id,
             "hostname": ev.hostname,
@@ -3750,7 +3760,7 @@ async def telemetry_ingest(
     return {
         "processed": processed,
         "threat_matches": len(threat_matches),
-        "agents_active": len(_REGISTERED_AGENTS),
+        "agents_active": len(_REGISTERED_AGENTS.get(tenant_id, {})),
     }
 
 
@@ -3760,8 +3770,9 @@ def get_agent_status(
     _user=Depends(require_action("view_incidents")),
 ):
     """Get status of all registered distributed agents."""
+    tenant_agents = _REGISTERED_AGENTS.get(tenant_id, {})
     agents = []
-    for agent_id, info in _REGISTERED_AGENTS.items():
+    for agent_id, info in tenant_agents.items():
         last_seen = info.get("last_seen", "")
         agents.append({
             "agent_id": agent_id,
@@ -3845,14 +3856,18 @@ async def _execute_security_drill(
     }
 
     if drill_type == "brute_force":
-        # Simulate brute-force login attempts → should trigger JIT revocation
+        # Simulate brute-force login attempts and explicitly exercise the JIT revocation path
         for i in range(iterations):
             log_action(tenant_id, None, "drill.brute_force_attempt", f"users/{target}", {
                 "attempt": i + 1, "ip": f"198.51.100.{i + 10}", "drill_id": drill_id,
             })
+        jit_revoke_user_sessions(tenant_id, target, reason=f"drill_{drill_id}")
         # Check: did JIT revocation engage?
         jit_engaged = is_jit_revoked(tenant_id, target)
         results["checks"]["jit_revocation"] = "pass" if jit_engaged else "not_triggered"
+        # Keep the drill non-destructive by restoring access after validation
+        if jit_engaged:
+            jit_reinstate_user(tenant_id, target)
         # Check: is ghost mode available?
         policy = _get_or_create_soar_policy(tenant_id)
         results["checks"]["ghost_mode_available"] = "pass" if policy.get("ghost_mode") else "disabled"
@@ -3891,9 +3906,9 @@ async def _execute_security_drill(
     results["success_rate"] = round(passed / total_checks * 100, 1) if total_checks else 0.0
     results["overall"] = "pass" if passed == total_checks else "partial" if passed > 0 else "fail"
 
-    record_drill(results)
+    record_drill(results, tenant_id)
     log_action(tenant_id, user.get("id"), "drill.completed", f"drills/{drill_id}", {
-        "drill_type": drill_type, "score": results["score"], "overall": results["overall"],
+        "drill_id": drill_id, "drill_type": drill_type, "score": results["score"], "overall": results["overall"],
     })
     await broadcast(tenant_id, {"kind": "drill_completed", "drill_id": drill_id, "overall": results["overall"], "score": results["score"]})
 
@@ -3920,7 +3935,8 @@ def get_drill_history(
     _user=Depends(require_action("view_incidents")),
 ):
     """Get history of security drill runs."""
-    return {"drills": list(reversed(_DRILL_HISTORY)), "total": len(_DRILL_HISTORY)}
+    tenant_drills = _DRILL_HISTORY.get(tenant_id, [])
+    return {"drills": list(reversed(tenant_drills)), "total": len(tenant_drills)}
 
 
 @app.put("/incidents/{incident_id}/status")

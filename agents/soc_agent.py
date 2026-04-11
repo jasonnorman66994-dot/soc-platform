@@ -19,7 +19,6 @@ import argparse
 import logging
 import os
 import platform
-import socket
 import time
 import uuid
 from datetime import datetime, timezone
@@ -169,6 +168,9 @@ def main():
         return
     if psutil is None:
         log.warning("psutil not installed — telemetry will be limited. pip install psutil")
+    if not args.api_key.strip():
+        log.error("API key is required. Provide --api-key or set SOC_API_KEY.")
+        return
 
     headers = {
         "Content-Type": "application/json",

@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
 
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
+
 export default function AuditDashboard() {
   const [stats, setStats] = useState(null);
   const [audit, setAudit] = useState(null);
@@ -24,12 +26,12 @@ export default function AuditDashboard() {
     setLoading(true);
     try {
       const [statsRes, auditRes, jitRes, threatRes, agentsRes, drillsRes] = await Promise.all([
-        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/soar/stats?window_days=${windowDays}`, { headers: headers() }),
-        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/soar/audit?window_days=${windowDays}`, { headers: headers() }),
-        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/jit/status`, { headers: headers() }),
-        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/threat-intel/feed`, { headers: headers() }),
-        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/agents/status`, { headers: headers() }),
-        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/drills/history`, { headers: headers() }),
+        fetch(`${API}/soar/stats?window_days=${windowDays}`, { headers: headers() }),
+        fetch(`${API}/soar/audit?window_days=${windowDays}`, { headers: headers() }),
+        fetch(`${API}/jit/status`, { headers: headers() }),
+        fetch(`${API}/threat-intel/feed`, { headers: headers() }),
+        fetch(`${API}/agents/status`, { headers: headers() }),
+        fetch(`${API}/drills/history`, { headers: headers() }),
       ]);
       if (statsRes.ok) setStats(await statsRes.json());
       if (auditRes.ok) setAudit(await auditRes.json());
