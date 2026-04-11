@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from correlation.patterns import detect_patterns
+
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+WINDOW = timedelta(minutes=10)
+user_sessions: dict[str, list[tuple[datetime, dict[str, Any]]]] = defaultdict(list)
 
 
 def _normalize_timestamp(value: Any) -> datetime:
@@ -22,6 +27,23 @@ def _normalize_timestamp(value: Any) -> datetime:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed
     return datetime.now(timezone.utc)
+
+
+def correlate(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Correlate recent user activity into sequence-based alerts within a fixed time window."""
+    user = str(event.get("user") or "anonymous")
+    event_time = _normalize_timestamp(event.get("timestamp"))
+
+    user_sessions[user].append((event_time, event))
+
+    user_sessions[user] = [
+        (timestamp, item)
+        for timestamp, item in user_sessions[user]
+        if event_time - timestamp < WINDOW
+    ]
+
+    timeline = [item for _, item in sorted(user_sessions[user], key=lambda row: row[0])]
+    return detect_patterns(timeline)
 
 
 def _max_severity(alerts: list[dict]) -> str:
