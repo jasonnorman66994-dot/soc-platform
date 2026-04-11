@@ -16,6 +16,8 @@
 - Monthly board report schedules now support `day_of_month` in the admin API and Command Center.
 - Board report schedules can now be executed manually through `POST /api/admin/reports/schedules/{id}/run` and the Command Center `Run Now` control.
 - Report schedules can now be paused or resumed via `PATCH /api/admin/reports/schedules/{id}` (`enabled` field) and the Command Center `Pause`/`Resume` toggle buttons.
+- Background auto-executor: the backend now runs a 1-minute APScheduler job that fires all enabled schedules whose `next_run <= NOW()` automatically.
+- New endpoint `GET /api/admin/reports/schedules/due` lists all currently overdue enabled schedules for operational visibility.
 
 ### Changed
 
