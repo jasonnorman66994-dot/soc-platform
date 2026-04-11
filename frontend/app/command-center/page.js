@@ -69,6 +69,8 @@ export default function CommandCenterPage() {
   const [mlAnomalies, setMlAnomalies] = useState(null);
   const [advancedAnalytics, setAdvancedAnalytics] = useState(null);
   const [toast, setToast] = useState(null);
+  const [liveSimulationStatus, setLiveSimulationStatus] = useState(null);
+  const [liveSimulationForm, setLiveSimulationForm] = useState({ interval_seconds: 25, include_noise: true, rounds: 2 });
 
   const authHeaders = useMemo(
     () => ({
@@ -101,6 +103,7 @@ export default function CommandCenterPage() {
     fetchExecutiveStats();
     fetchScenarioCatalog();
     loadAdvancedAnalytics();
+    loadLiveSimulationStatus();
 
     const ws = new WebSocket(`${WS}?tenant_id=${encodeURIComponent(tenantId)}&token=${encodeURIComponent(accessToken)}`);
     ws.onopen = () => setWsState("connected");
@@ -357,11 +360,91 @@ export default function CommandCenterPage() {
     }
   }
 
+  async function loadLiveSimulationStatus() {
+    try {
+      const res = await fetch(`${API}/demo/live/status`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) return;
+      setLiveSimulationStatus(data);
+    } catch {
+      // Status polling failure should not block command center usage.
+    }
+  }
+
+  async function seedAttackDataset() {
+    const rounds = Math.max(1, Math.min(Number.parseInt(String(liveSimulationForm.rounds), 10) || 2, 6));
+    try {
+      const res = await fetch(`${API}/demo/seed-attack-data`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ rounds, include_noise: !!liveSimulationForm.include_noise }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to seed attack dataset" });
+        return;
+      }
+      setToast({ type: "success", message: `Seeded ${data?.total_events ?? 0} events across scenarios` });
+      await fetchAlerts();
+      await fetchIncidents();
+      await fetchExecutiveStats();
+      await loadAdvancedAnalytics();
+    } catch {
+      setToast({ type: "error", message: "Failed to seed attack dataset" });
+    }
+  }
+
+  async function startLiveSimulation() {
+    const interval = Math.max(5, Math.min(Number.parseInt(String(liveSimulationForm.interval_seconds), 10) || 25, 300));
+    try {
+      const res = await fetch(`${API}/demo/live/start`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ interval_seconds: interval, include_noise: !!liveSimulationForm.include_noise }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to start live simulation" });
+        return;
+      }
+      setLiveSimulationStatus(data);
+      setToast({ type: "success", message: `Live simulation running every ${interval}s` });
+    } catch {
+      setToast({ type: "error", message: "Failed to start live simulation" });
+    }
+  }
+
+  async function stopLiveSimulation() {
+    try {
+      const res = await fetch(`${API}/demo/live/stop`, {
+        method: "POST",
+        headers: authHeaders,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to stop live simulation" });
+        return;
+      }
+      setLiveSimulationStatus(data);
+      setToast({ type: "success", message: "Live simulation stopped" });
+    } catch {
+      setToast({ type: "error", message: "Failed to stop live simulation" });
+    }
+  }
+
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 2800);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (!accessToken || !tenantId) return;
+    const timer = setInterval(() => {
+      loadLiveSimulationStatus();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [accessToken, tenantId]);
 
   async function createAdminSession() {
     setAdminError("");
@@ -831,6 +914,48 @@ export default function CommandCenterPage() {
             <li style={row}><span>Dry Run</span><span>{simulationResult.dry_run ? "yes" : "no"}</span></li>
           </ul>
         ) : null}
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>Live Attack Pipeline</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 8 }}>
+          <input
+            style={input}
+            type="number"
+            min="5"
+            max="300"
+            value={liveSimulationForm.interval_seconds}
+            onChange={(e) => setLiveSimulationForm((s) => ({ ...s, interval_seconds: e.target.value }))}
+            placeholder="Live interval sec"
+          />
+          <input
+            style={input}
+            type="number"
+            min="1"
+            max="6"
+            value={liveSimulationForm.rounds}
+            onChange={(e) => setLiveSimulationForm((s) => ({ ...s, rounds: e.target.value }))}
+            placeholder="Seed rounds"
+          />
+          <label style={{ color: "#cbd5e1", display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={liveSimulationForm.include_noise}
+              onChange={(e) => setLiveSimulationForm((s) => ({ ...s, include_noise: e.target.checked }))}
+            />
+            Include Noise
+          </label>
+          <button style={btnSecondary} onClick={seedAttackDataset}>Seed Attack Data</button>
+          <button style={btn} onClick={startLiveSimulation}>Start Live Simulation</button>
+          <button style={btnSecondary} onClick={stopLiveSimulation}>Stop Live Simulation</button>
+        </div>
+        <ul style={{ ...list, marginTop: 10 }}>
+          <li style={row}><span>Running</span><span>{liveSimulationStatus?.running ? "yes" : "no"}</span></li>
+          <li style={row}><span>Interval (sec)</span><span>{liveSimulationStatus?.interval_seconds ?? "-"}</span></li>
+          <li style={row}><span>Last Scenario</span><span>{liveSimulationStatus?.last_scenario ?? "-"}</span></li>
+          <li style={row}><span>Emitted Count</span><span>{liveSimulationStatus?.emitted_count ?? 0}</span></li>
+          <li style={row}><span>Last Emitted</span><span>{liveSimulationStatus?.last_emitted_at || "-"}</span></li>
+        </ul>
       </section>
 
       <section style={{ ...card, marginTop: 16 }}>

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import asyncio
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Header, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ConfigDict, constr
@@ -10,7 +11,7 @@ import secrets
 import io
 import csv
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Any
 from uuid import uuid4
 
 import psycopg
@@ -171,6 +172,8 @@ rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 clients: list[dict] = []
 RATE_LIMITS: dict[str, list[datetime]] = {}
 RULES_DIR = Path(__file__).parent / "rules"
+LIVE_SIMULATION_TASKS: dict[str, asyncio.Task] = {}
+LIVE_SIMULATION_STATE: dict[str, dict[str, Any]] = {}
 
 ROLE_ORDER = {"viewer": 1, "analyst": 2, "admin": 3, "owner": 4}
 VALID_PLANS = {"free", "pro", "enterprise"}
@@ -240,10 +243,23 @@ class DemoAttackBody(BaseModel):
         "impossible_travel_burst",
         "insider_data_exfiltration",
         "password_spray_wave",
+        "suspicious_oauth_app",
+        "powershell_execution_chain",
     ] = "credential_compromise_chain"
     iterations: int = Field(default=1, ge=1, le=5)
     include_noise: bool = False
     dry_run: bool = False
+
+
+class DemoSeedBody(BaseModel):
+    rounds: int = Field(default=2, ge=1, le=6)
+    include_noise: bool = True
+
+
+class LiveSimulationBody(BaseModel):
+    interval_seconds: int = Field(default=25, ge=5, le=300)
+    include_noise: bool = True
+    scenarios: list[str] | None = None
 
 
 class WaitlistLeadBody(BaseModel):
@@ -289,6 +305,8 @@ class AdminDemoBody(BaseModel):
         "impossible_travel_burst",
         "insider_data_exfiltration",
         "password_spray_wave",
+        "suspicious_oauth_app",
+        "powershell_execution_chain",
     ] = "credential_compromise_chain"
     iterations: int = Field(default=1, ge=1, le=5)
     include_noise: bool = False
@@ -1201,6 +1219,20 @@ def _scenario_catalog() -> list[dict]:
             "safety": "synthetic-only",
             "expected_detections": ["SIGMA-002"],
         },
+        {
+            "id": "suspicious_oauth_app",
+            "name": "Suspicious OAuth Application",
+            "description": "Untrusted OAuth consent followed by suspicious account activity.",
+            "safety": "synthetic-only",
+            "expected_detections": ["SIGMA-006", "SIGMA-002"],
+        },
+        {
+            "id": "powershell_execution_chain",
+            "name": "PowerShell Execution Chain",
+            "description": "Encoded PowerShell execution leading to outbound exfiltration.",
+            "safety": "synthetic-only",
+            "expected_detections": ["SIGMA-007", "SIGMA-003"],
+        },
     ]
 
 
@@ -1326,6 +1358,60 @@ def _build_scenario_events(body: AdminDemoBody, iteration: int) -> tuple[list[di
             },
         ]
         timeline = ["Sensitive file accessed", "Large outbound exfiltration"]
+    elif scenario == "suspicious_oauth_app":
+        events = [
+            {
+                "user_id": base_user,
+                "event_type": "oauth_grant",
+                "raw": {
+                    "untrusted_app": True,
+                    "app_name": "DocuSync Pro",
+                    "scope": "mail.read files.read.all offline_access",
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+            {
+                "user_id": base_user,
+                "event_type": "login_anomaly",
+                "ip": f"198.51.100.{70 + iteration}",
+                "raw": {
+                    "from": source_country,
+                    "to": destination_country,
+                    "geo_mismatch": True,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+        ]
+        timeline = ["OAuth consent granted to untrusted app", "Follow-on impossible-travel login detected"]
+    elif scenario == "powershell_execution_chain":
+        events = [
+            {
+                "user_id": base_user,
+                "event_type": "powershell_exec",
+                "raw": {
+                    "encoded_command": True,
+                    "command": "powershell -enc SQBFAFgA",
+                    "host": "wkstn-22",
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+            {
+                "user_id": base_user,
+                "event_type": "data_exfil",
+                "ip": f"203.0.113.{90 + iteration}",
+                "raw": {
+                    "channel": "https_upload",
+                    "bytes": 42000000,
+                    "sensitive": True,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+        ]
+        timeline = ["Encoded PowerShell executed", "Outbound exfiltration channel observed"]
     else:
         events = [
             {
@@ -1393,6 +1479,71 @@ async def _run_demo_attack_flow(tenant_id: str, body: AdminDemoBody) -> dict:
         "timeline": timeline,
         "outcomes": outcomes,
     }
+
+
+def _scenario_ids() -> list[str]:
+    return [item["id"] for item in _scenario_catalog()]
+
+
+def _normalize_live_scenarios(requested: list[str] | None) -> list[str]:
+    available = set(_scenario_ids())
+    defaults = [
+        "credential_compromise_chain",
+        "impossible_travel_burst",
+        "suspicious_oauth_app",
+        "powershell_execution_chain",
+    ]
+    if not requested:
+        return [item for item in defaults if item in available]
+    normalized = [item for item in requested if item in available]
+    return normalized or [item for item in defaults if item in available]
+
+
+async def _live_simulation_worker(tenant_id: str) -> None:
+    cursor = 0
+    while True:
+        state = LIVE_SIMULATION_STATE.get(tenant_id) or {}
+        if not state.get("running"):
+            return
+
+        scenarios = state.get("scenarios") or _normalize_live_scenarios(None)
+        if not scenarios:
+            return
+        scenario = scenarios[cursor % len(scenarios)]
+        cursor += 1
+
+        body = AdminDemoBody(
+            user_id="demo.user",
+            source_country="UK",
+            destination_country="US",
+            scenario=scenario,
+            iterations=1,
+            include_noise=bool(state.get("include_noise", True)),
+            dry_run=False,
+        )
+
+        try:
+            await _run_demo_attack_flow(tenant_id, body)
+            state["last_emitted_at"] = now_utc().isoformat()
+            state["last_scenario"] = scenario
+            state["emitted_count"] = int(state.get("emitted_count", 0)) + 1
+            LIVE_SIMULATION_STATE[tenant_id] = state
+        except Exception as exc:  # noqa: BLE001
+            state["last_error"] = str(exc)
+            LIVE_SIMULATION_STATE[tenant_id] = state
+
+        await asyncio.sleep(int(state.get("interval_seconds", 25)))
+
+
+async def _stop_live_simulation(tenant_id: str) -> None:
+    task = LIVE_SIMULATION_TASKS.get(tenant_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    LIVE_SIMULATION_TASKS.pop(tenant_id, None)
 
 
 def reset_demo_tenant_data(regenerate_api_key: bool = False) -> dict:
@@ -1726,6 +1877,45 @@ def get_alerts(tenant_id: str = Depends(get_tenant), _user=Depends(require_actio
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM alerts WHERE tenant_id=%s ORDER BY id DESC LIMIT 200", (tenant_id,))
             return cur.fetchall()
+
+
+@app.get("/events")
+def get_events(
+    limit: int = 80,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    safe_limit = max(1, min(limit, 500))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, user_id, type, raw, timestamp FROM events WHERE tenant_id=%s ORDER BY id DESC LIMIT %s",
+                (tenant_id, safe_limit),
+            )
+            rows = cur.fetchall()
+
+    normalized = []
+    for row in rows:
+        raw = row.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                raw = {}
+        raw = raw or {}
+        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        normalized.append(
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"].isoformat(),
+                "event_type": row["type"],
+                "user": row.get("user_id"),
+                "ip": raw.get("ip") or payload_raw.get("ip"),
+                "location": raw.get("from") or raw.get("location") or payload_raw.get("from") or payload_raw.get("location"),
+                "raw": raw,
+            }
+        )
+    return normalized
 
 
 @app.get("/incidents")
@@ -2946,6 +3136,97 @@ def demo_scenarios():
     return {
         "safe_lab": True,
         "scenarios": _scenario_catalog(),
+    }
+
+
+@app.post("/demo/seed-attack-data")
+async def demo_seed_attack_data(
+    body: DemoSeedBody,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("respond")),
+):
+    scenario_ids = _normalize_live_scenarios(None)
+    generated = []
+    for _ in range(body.rounds):
+        for scenario in scenario_ids:
+            result = await _run_demo_attack_flow(
+                tenant_id,
+                AdminDemoBody(
+                    user_id="demo.user",
+                    source_country="UK",
+                    destination_country="US",
+                    scenario=scenario,  # type: ignore[arg-type]
+                    iterations=1,
+                    include_noise=body.include_noise,
+                    dry_run=False,
+                ),
+            )
+            generated.append({"scenario": scenario, "event_count": result.get("event_count", 0)})
+
+    return {
+        "tenant_id": tenant_id,
+        "status": "seeded",
+        "rounds": body.rounds,
+        "scenarios": generated,
+        "total_events": sum(item["event_count"] for item in generated),
+    }
+
+
+@app.post("/demo/live/start")
+async def demo_live_start(
+    body: LiveSimulationBody,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("respond")),
+):
+    await _stop_live_simulation(tenant_id)
+    state = {
+        "running": True,
+        "interval_seconds": body.interval_seconds,
+        "include_noise": body.include_noise,
+        "scenarios": _normalize_live_scenarios(body.scenarios),
+        "started_at": now_utc().isoformat(),
+        "last_emitted_at": None,
+        "last_scenario": None,
+        "last_error": None,
+        "emitted_count": 0,
+    }
+    LIVE_SIMULATION_STATE[tenant_id] = state
+    LIVE_SIMULATION_TASKS[tenant_id] = asyncio.create_task(_live_simulation_worker(tenant_id))
+    return {"tenant_id": tenant_id, **state}
+
+
+@app.post("/demo/live/stop")
+async def demo_live_stop(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("respond")),
+):
+    await _stop_live_simulation(tenant_id)
+    state = LIVE_SIMULATION_STATE.get(tenant_id, {})
+    state["running"] = False
+    state["stopped_at"] = now_utc().isoformat()
+    LIVE_SIMULATION_STATE[tenant_id] = state
+    return {"tenant_id": tenant_id, **state}
+
+
+@app.get("/demo/live/status")
+def demo_live_status(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    state = LIVE_SIMULATION_STATE.get(tenant_id, {})
+    task = LIVE_SIMULATION_TASKS.get(tenant_id)
+    return {
+        "tenant_id": tenant_id,
+        "running": bool(state.get("running") and task and not task.done()),
+        "interval_seconds": state.get("interval_seconds"),
+        "include_noise": state.get("include_noise"),
+        "scenarios": state.get("scenarios") or [],
+        "started_at": state.get("started_at"),
+        "stopped_at": state.get("stopped_at"),
+        "last_emitted_at": state.get("last_emitted_at"),
+        "last_scenario": state.get("last_scenario"),
+        "last_error": state.get("last_error"),
+        "emitted_count": state.get("emitted_count", 0),
     }
 
 

@@ -1,26 +1,87 @@
 TRUSTED_DOMAINS = {"company.com", "microsoft.com", "github.com", "google.com"}
 
 
-SIGMA_RULES = [
-    {
-        "id": "SIGMA-001",
-        "name": "Urgent Untrusted Email",
-        "mitre": "T1566.001",
-        "severity": "high",
-    },
-    {
-        "id": "SIGMA-002",
-        "name": "Impossible Login Travel",
-        "mitre": "T1078",
-        "severity": "critical",
-    },
-    {
-        "id": "SIGMA-003",
-        "name": "Data Exfiltration Pattern",
-        "mitre": "T1048",
-        "severity": "high",
-    },
-]
+def _get_nested_value(data: dict, path: str):
+    current = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _matches_field(actual, expected) -> bool:
+    if isinstance(expected, list):
+        return actual in expected
+    if isinstance(expected, str) and isinstance(actual, str):
+        return actual.lower() == expected.lower()
+    return actual == expected
+
+
+def _matches_match_block(event: dict, match: dict) -> bool:
+    event_type = event.get("event_type") or event.get("type")
+    raw = event.get("raw") or {}
+
+    match_event_types = set(match.get("event_types", []))
+    if match_event_types and event_type not in match_event_types:
+        return False
+
+    if match.get("geo_mismatch") and not raw.get("geo_mismatch"):
+        return False
+
+    required_fields = match.get("fields", {})
+    for field_path, expected in required_fields.items():
+        actual = _get_nested_value(event, field_path)
+        if not _matches_field(actual, expected):
+            return False
+
+    return True
+
+
+def _matches_sigma_detection(event: dict, detection: dict) -> bool:
+    if not detection:
+        return False
+
+    # Supports a minimal Sigma-like form:
+    # detection:
+    #   selection:
+    #     event_type: login_anomaly
+    #     raw.geo_mismatch: true
+    #   condition: selection
+    selection = detection.get("selection")
+    condition = str(detection.get("condition") or "selection").strip()
+    if condition != "selection" or not isinstance(selection, dict):
+        return False
+
+    for field_path, expected in selection.items():
+        actual = _get_nested_value(event, field_path)
+        if not _matches_field(actual, expected):
+            return False
+
+    return True
+
+
+def _append_custom_rule_alerts(event: dict, rules: list[dict], alerts: list[dict]) -> None:
+    for rule in rules:
+        matched = False
+        if isinstance(rule.get("match"), dict):
+            matched = _matches_match_block(event, rule.get("match") or {})
+        elif isinstance(rule.get("detection"), dict):
+            matched = _matches_sigma_detection(event, rule.get("detection") or {})
+
+        if not matched:
+            continue
+
+        alerts.append(
+            {
+                "rule_id": rule.get("id", "custom-rule"),
+                "title": rule.get("title", "Custom Detection Match"),
+                "severity": rule.get("severity", "medium"),
+                "confidence": int(rule.get("confidence", 75)),
+                "mitre": rule.get("mitre", "N/A"),
+                "summary": rule.get("summary", f"Matched rule {rule.get('id', 'custom-rule')}"),
+            }
+        )
 
 
 def detect(event: dict, rules: list[dict] | None = None) -> list[dict]:
@@ -91,23 +152,6 @@ def detect(event: dict, rules: list[dict] | None = None) -> list[dict]:
         )
 
     if rules:
-        for rule in rules:
-            match_event_types = set(rule.get("match", {}).get("event_types", []))
-            requires_geo_mismatch = rule.get("match", {}).get("geo_mismatch")
-            if match_event_types and event_type not in match_event_types:
-                continue
-            if requires_geo_mismatch and not raw.get("geo_mismatch"):
-                continue
-
-            alerts.append(
-                {
-                    "rule_id": rule.get("id", "custom-rule"),
-                    "title": rule.get("title", "Custom Detection Match"),
-                    "severity": rule.get("severity", "medium"),
-                    "confidence": int(rule.get("confidence", 75)),
-                    "mitre": rule.get("mitre", "N/A"),
-                    "summary": rule.get("summary", f"Matched rule {rule.get('id', 'custom-rule')}")
-                }
-            )
+        _append_custom_rule_alerts(event, rules, alerts)
 
     return alerts

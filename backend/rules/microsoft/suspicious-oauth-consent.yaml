@@ -1,0 +1,13 @@
+id: MSFT-OAUTH-001
+title: Suspicious OAuth App Consent
+author: SOC Team
+source: microsoft
+severity: high
+confidence: 84
+mitre: T1528
+summary: OAuth app consent granted to an untrusted application
+detection:
+  selection:
+    event_type: oauth_grant
+    raw.untrusted_app: true
+  condition: selection
