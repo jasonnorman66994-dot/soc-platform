@@ -33,6 +33,9 @@
 - Added multi-event attack pattern module (`backend/correlation/patterns.py`) for sequence-based correlation.
 - Worker pipeline now combines baseline detections with timeline-based correlated alerts over a rolling 10-minute user window.
 - Added MITRE ATT&CK technique mappings on correlated alert payloads (for example account takeover and privilege escalation patterns).
+- Added Redis-backed realtime streaming relay (`backend/api/realtime.py`) and WebSocket endpoint (`/ws/alerts`) in SOC core API.
+- Worker now publishes processed event + alert payloads to realtime channel for UI subscribers.
+- Added SOC dashboard UI routes and components for live alert feed, attack timeline, graph investigation, and replay controls under `frontend/app/soc-dashboard` and `frontend/components/*`.
 
 ### Changed
 

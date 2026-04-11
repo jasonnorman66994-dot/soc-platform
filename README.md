@@ -56,6 +56,7 @@ Core SOC API endpoints:
 - `GET /alerts` returns generated alerts from PostgreSQL.
 - `GET /incidents` returns correlated incidents with aggregate counters.
 - `GET /incidents/{id}` returns incident details by id.
+- `GET /ws/alerts` provides WebSocket streaming of processed event+alert payloads via Redis pubsub relay.
 
 Phase 3 correlation behavior:
 
@@ -63,6 +64,29 @@ Phase 3 correlation behavior:
 - Correlation tracks a rolling 10-minute user timeline and detects sequence attacks.
 - Built-in patterns include account takeover, impossible travel in login chains, and post-compromise privilege escalation.
 - Correlated alerts include MITRE ATT&CK technique mappings in alert details.
+
+### Phase 4 SOC Dashboard UI (Real-Time Command Center)
+
+New frontend routes and components provide a live SOC analyst experience:
+
+- `frontend/app/soc-dashboard/page.js` live command surface
+- `frontend/components/AlertFeed.js` real-time alert stream feed
+- `frontend/components/Timeline.js` attack timeline visualization and replay highlight
+- `frontend/components/AttackGraph.js` IP -> user -> event relationship graph (React Flow)
+- `frontend/lib/socket.js` resilient WebSocket connector with reconnect support
+
+Additional route surfaces:
+
+- `/alerts` for focused live feed view
+- `/timeline` for historical timeline view
+- `/graph` for investigation graph view
+
+Environment variables for SOC dashboard routing:
+
+- `NEXT_PUBLIC_SOC_CORE_API_URL` (default `http://localhost:8000`)
+- `NEXT_PUBLIC_SOC_CORE_WS_URL` (default `ws://localhost:8000/ws/alerts`)
+- `SOC_CORE_REDIS_URL` for API/worker realtime relay backing
+- `SOC_CORE_REALTIME_CHANNEL` for Redis pubsub channel name
 
 ## Services
 

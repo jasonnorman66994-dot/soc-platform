@@ -69,6 +69,7 @@ export default function HomePage() {
         </p>
         <div style={heroActions}>
           <Link href="/command-center" style={ctaPrimary} onClick={() => trackEvent("cta_open_command_center", { location: "hero" })}>Open Command Center</Link>
+          <Link href="/soc-dashboard" style={ctaSecondary} onClick={() => trackEvent("cta_open_soc_dashboard", { location: "hero" })}>Open SOC Dashboard</Link>
           <a href="/api/demo/bootstrap" style={ctaSecondary} onClick={() => trackEvent("cta_bootstrap_click", { location: "hero" })}>View Demo Tenant Bootstrap</a>
         </div>
       </section>
