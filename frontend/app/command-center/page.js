@@ -71,6 +71,10 @@ export default function CommandCenterPage() {
   const [toast, setToast] = useState(null);
   const [liveSimulationStatus, setLiveSimulationStatus] = useState(null);
   const [liveSimulationForm, setLiveSimulationForm] = useState({ interval_seconds: 25, include_noise: true, rounds: 2 });
+  const [executiveStory, setExecutiveStory] = useState(null);
+  const [storyWindowMinutes, setStoryWindowMinutes] = useState("180");
+  const [storyLoading, setStoryLoading] = useState(false);
+  const [storyError, setStoryError] = useState("");
 
   const authHeaders = useMemo(
     () => ({
@@ -104,6 +108,7 @@ export default function CommandCenterPage() {
     fetchScenarioCatalog();
     loadAdvancedAnalytics();
     loadLiveSimulationStatus();
+    loadExecutiveStory();
 
     const ws = new WebSocket(`${WS}?tenant_id=${encodeURIComponent(tenantId)}&token=${encodeURIComponent(accessToken)}`);
     ws.onopen = () => setWsState("connected");
@@ -368,6 +373,66 @@ export default function CommandCenterPage() {
       setLiveSimulationStatus(data);
     } catch {
       // Status polling failure should not block command center usage.
+    }
+  }
+
+  function getSafeStoryWindowMinutes() {
+    return Math.max(15, Math.min(Number.parseInt(storyWindowMinutes || "180", 10) || 180, 1440));
+  }
+
+  async function loadExecutiveStory() {
+    if (storyLoading) return;
+    setStoryError("");
+    setStoryLoading(true);
+    try {
+      const safeWindow = getSafeStoryWindowMinutes();
+      const res = await fetch(`${API}/reports/executive/story?window_minutes=${safeWindow}&event_limit=140`, {
+        headers: authHeaders,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load executive attack story";
+        setStoryError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setStoryWindowMinutes(String(safeWindow));
+      setExecutiveStory(data);
+      setToast({ type: "success", message: "Executive attack story loaded" });
+    } catch {
+      const message = "Failed to load executive attack story";
+      setStoryError(message);
+      setToast({ type: "error", message });
+    } finally {
+      setStoryLoading(false);
+    }
+  }
+
+  async function downloadExecutiveStoryMarkdown() {
+    try {
+      const safeWindow = getSafeStoryWindowMinutes();
+      const res = await fetch(`${API}/reports/executive/story.md?window_minutes=${safeWindow}&event_limit=140`, {
+        headers: authHeaders,
+      });
+      const body = await res.text();
+      if (!res.ok) {
+        setToast({ type: "error", message: body || "Executive report export failed" });
+        return;
+      }
+
+      const blob = new Blob([body], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `executive-attack-story-${safeWindow}m.md`;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setToast({ type: "success", message: "Executive report exported" });
+    } catch {
+      setToast({ type: "error", message: "Executive report export failed" });
     }
   }
 
@@ -984,6 +1049,53 @@ export default function CommandCenterPage() {
           <div style={miniCard}><div style={miniTitle}>Alerts (Advanced)</div><div>{advancedAnalytics?.overview?.alert_count ?? "-"}</div></div>
         </div>
         {analyticsLoading ? <p style={{ color: "#94a3b8", marginBottom: 0 }}>Loading analytics...</p> : null}
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>Executive Attack Story + One-Click Export</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 8 }}>
+          <input
+            style={input}
+            type="number"
+            min="15"
+            max="1440"
+            value={storyWindowMinutes}
+            onChange={(e) => setStoryWindowMinutes(e.target.value)}
+            placeholder="Story window minutes"
+          />
+          <button style={btn} onClick={loadExecutiveStory} disabled={storyLoading}>Build Story Timeline</button>
+          <button style={btnSecondary} onClick={downloadExecutiveStoryMarkdown}>Export Executive Markdown</button>
+        </div>
+        {storyError ? <p style={{ color: "#f87171", marginBottom: 0 }}>{storyError}</p> : null}
+        {storyLoading ? <p style={{ color: "#94a3b8", marginBottom: 0 }}>Generating attack story...</p> : null}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10, marginTop: 10 }}>
+          <div style={miniCard}><div style={miniTitle}>Events</div><div>{executiveStory?.summary?.total_events ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Alerts</div><div>{executiveStory?.summary?.total_alerts ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Critical Alerts</div><div>{executiveStory?.summary?.critical_alerts ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Open Incidents</div><div>{executiveStory?.summary?.open_incidents ?? "-"}</div></div>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <h4 style={{ margin: 0, color: "#cbd5e1" }}>Key Findings</h4>
+          <ul style={list}>
+            {(executiveStory?.key_findings || []).map((finding, idx) => (
+              <li key={`${finding}-${idx}`} style={{ ...row, justifyContent: "flex-start" }}>{finding}</li>
+            ))}
+          </ul>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <h4 style={{ margin: 0, color: "#cbd5e1" }}>Attack Timeline</h4>
+          <ul style={list}>
+            {(executiveStory?.timeline || []).slice(0, 12).map((item) => (
+              <li key={`${item.id}-${item.timestamp}`} style={row}>
+                <span>{item.timestamp} | {item.title}</span>
+                <span style={{ color: sev(item.severity) }}>{item.severity}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12, marginTop: 16 }}>
