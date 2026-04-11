@@ -3,6 +3,8 @@ import os
 from datetime import datetime, timezone
 
 from kafka import KafkaConsumer
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
 
 from correlation.engine import build_incident
 from detection.rules import detect
@@ -63,21 +65,21 @@ def run() -> None:
 
             incident_payload = build_incident(event, alerts)
             if incident_payload is not None:
-                incident_row = (
-                    db.query(Incident)
-                    .filter(Incident.fingerprint == incident_payload["fingerprint"])
-                    .first()
+                upsert_incident = insert(Incident).values(**incident_payload)
+                db.execute(
+                    upsert_incident.on_conflict_do_update(
+                        index_elements=[Incident.fingerprint],
+                        set_={
+                            "last_seen": func.greatest(Incident.last_seen, incident_payload["last_seen"]),
+                            "event_count": Incident.event_count + 1,
+                            "alert_count": Incident.alert_count + len(alerts),
+                            "severity": incident_payload["severity"],
+                            "description": incident_payload["description"],
+                            "context": incident_payload["context"],
+                            "updated_at": datetime.now(timezone.utc),
+                        },
+                    )
                 )
-
-                if incident_row is None:
-                    db.add(Incident(**incident_payload))
-                else:
-                    incident_row.last_seen = incident_payload["last_seen"]
-                    incident_row.event_count += 1
-                    incident_row.alert_count += len(alerts)
-                    incident_row.severity = incident_payload["severity"]
-                    incident_row.description = incident_payload["description"]
-                    incident_row.context = incident_payload["context"]
 
             db.commit()
 

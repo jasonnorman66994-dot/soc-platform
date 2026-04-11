@@ -9,10 +9,18 @@ SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 def _normalize_timestamp(value: Any) -> datetime:
     if isinstance(value, datetime):
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            return value.replace(tzinfo=timezone.utc)
         return value
     if isinstance(value, str):
         normalized = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized)
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return datetime.now(timezone.utc)
+        if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
     return datetime.now(timezone.utc)
 
 
@@ -38,7 +46,7 @@ def build_incident(event: dict, alerts: list[dict]) -> dict | None:
     fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
 
     title = f"{event_type} correlation for {user}"
-    description = f"Detected {len(alerts)} alert(s) linked to {event_type} from IP {ip}"
+    description = f"Detected alerts linked to {event_type} from IP {ip}"
 
     return {
         "fingerprint": fingerprint,
