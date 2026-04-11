@@ -43,6 +43,8 @@ RULES_DIR = Path(__file__).parent / "rules"
 ROLE_ORDER = {"viewer": 1, "analyst": 2, "admin": 3, "owner": 4}
 VALID_PLANS = {"free", "pro", "enterprise"}
 VALID_LEAD_SOURCES = {"landing", "webinar", "partner", "unknown"}
+VALID_REPORT_SCHEDULE_FORMATS = {"markdown", "json"}
+VALID_REPORT_SCHEDULE_FREQUENCIES = {"daily", "weekly", "monthly"}
 ADMIN_SESSION_ALG = "HS256"
 SECURITY_WARNINGS: list[str] = []
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -149,6 +151,7 @@ class ReportScheduleCreate(BaseModel):
     format: str = "markdown"  # markdown or json
     frequency: str = "weekly"  # daily, weekly, monthly
     day_of_week: int | None = None  # 0=Monday, 6=Sunday (for weekly)
+    day_of_month: int | None = None  # 1-28 (for monthly)
     hour_of_day: int = 9
     window_days: int = 30
     incident_limit: int = 10
@@ -162,6 +165,7 @@ class ReportScheduleUpdate(BaseModel):
     format: str | None = None
     frequency: str | None = None
     day_of_week: int | None = None
+    day_of_month: int | None = None
     hour_of_day: int | None = None
     window_days: int | None = None
     incident_limit: int | None = None
@@ -176,6 +180,7 @@ class ReportScheduleResponse(BaseModel):
     format: str
     frequency: str
     day_of_week: int | None
+    day_of_month: int | None
     hour_of_day: int
     window_days: int
     incident_limit: int
@@ -191,6 +196,96 @@ class ReportScheduleResponse(BaseModel):
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def compute_next_report_run(
+    frequency: str,
+    hour_of_day: int,
+    day_of_week: int | None = None,
+    day_of_month: int | None = None,
+    reference_time: datetime | None = None,
+) -> datetime:
+    reference = reference_time or now_utc()
+    base = reference.replace(minute=0, second=0, microsecond=0)
+
+    if frequency == "daily":
+        candidate = base.replace(hour=hour_of_day)
+        if candidate <= reference:
+            candidate += timedelta(days=1)
+        return candidate
+
+    if frequency == "weekly":
+        if day_of_week is None:
+            raise HTTPException(status_code=422, detail="Weekly schedules require day_of_week")
+        days_ahead = (day_of_week - reference.weekday()) % 7
+        candidate = base.replace(hour=hour_of_day) + timedelta(days=days_ahead)
+        if candidate <= reference:
+            candidate += timedelta(days=7)
+        return candidate
+
+    if frequency == "monthly":
+        if day_of_month is None:
+            raise HTTPException(status_code=422, detail="Monthly schedules require day_of_month")
+        current_month_candidate = base.replace(day=day_of_month, hour=hour_of_day)
+        if current_month_candidate > reference:
+            return current_month_candidate
+
+        if reference.month == 12:
+            return current_month_candidate.replace(year=reference.year + 1, month=1)
+        return current_month_candidate.replace(month=reference.month + 1)
+
+    raise HTTPException(status_code=422, detail="Unsupported schedule frequency")
+
+
+def normalize_report_schedule_payload(payload: dict, existing: dict | None = None) -> dict:
+    merged = dict(existing or {})
+    merged.update(payload)
+
+    normalized_name = str(merged.get("name") or "").strip()
+    if not normalized_name:
+        raise HTTPException(status_code=422, detail="Schedule name is required")
+    merged["name"] = normalized_name
+
+    merged["format"] = str(merged.get("format") or "markdown").strip().lower()
+    if merged["format"] not in VALID_REPORT_SCHEDULE_FORMATS:
+        raise HTTPException(status_code=422, detail="Schedule format must be markdown or json")
+
+    merged["frequency"] = str(merged.get("frequency") or "weekly").strip().lower()
+    if merged["frequency"] not in VALID_REPORT_SCHEDULE_FREQUENCIES:
+        raise HTTPException(status_code=422, detail="Schedule frequency must be daily, weekly, or monthly")
+
+    merged["hour_of_day"] = max(0, min(int(merged.get("hour_of_day", 9)), 23))
+    merged["window_days"] = max(7, min(int(merged.get("window_days", 30)), 180))
+    merged["incident_limit"] = max(3, min(int(merged.get("incident_limit", 10)), 50))
+    merged["enabled"] = bool(merged.get("enabled", True))
+
+    day_of_week = merged.get("day_of_week")
+    merged["day_of_week"] = None if day_of_week is None else max(0, min(int(day_of_week), 6))
+
+    day_of_month = merged.get("day_of_month")
+    merged["day_of_month"] = None if day_of_month is None else max(1, min(int(day_of_month), 28))
+
+    if merged["frequency"] == "weekly" and merged["day_of_week"] is None:
+        raise HTTPException(status_code=422, detail="Weekly schedules require day_of_week")
+    if merged["frequency"] == "monthly" and merged["day_of_month"] is None:
+        raise HTTPException(status_code=422, detail="Monthly schedules require day_of_month")
+
+    if merged["frequency"] != "weekly":
+        merged["day_of_week"] = None
+    if merged["frequency"] != "monthly":
+        merged["day_of_month"] = None
+
+    merged["next_run"] = (
+        compute_next_report_run(
+            frequency=merged["frequency"],
+            hour_of_day=merged["hour_of_day"],
+            day_of_week=merged.get("day_of_week"),
+            day_of_month=merged.get("day_of_month"),
+        )
+        if merged["enabled"]
+        else None
+    )
+    return merged
 
 
 def hash_password(plain_password: str) -> str:
@@ -371,6 +466,7 @@ def init_db():
                     format TEXT NOT NULL DEFAULT 'markdown',
                     frequency TEXT NOT NULL DEFAULT 'weekly',
                     day_of_week INTEGER,
+                    day_of_month INTEGER,
                     hour_of_day INTEGER DEFAULT 9,
                     window_days INTEGER DEFAULT 30,
                     incident_limit INTEGER DEFAULT 10,
@@ -384,6 +480,7 @@ def init_db():
 
                 ALTER TABLE lead_captures ADD COLUMN IF NOT EXISTS tenant_id TEXT;
                 ALTER TABLE lead_captures ADD COLUMN IF NOT EXISTS converted_to_signup BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS day_of_month INTEGER;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_events_event_id ON billing_events (stripe_event_id) WHERE stripe_event_id IS NOT NULL;
 
                 ALTER TABLE events ADD COLUMN IF NOT EXISTS tenant_id TEXT;
@@ -1626,29 +1723,32 @@ def get_board_report_markdown(window_days: int = 30, incident_limit: int = 10, _
 @app.post("/admin/reports/schedules")
 def create_report_schedule(body: ReportScheduleCreate, _admin=Depends(require_internal_admin_token)):
     """Create a new board report export schedule."""
+    schedule = normalize_report_schedule_payload(body.model_dump())
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO report_schedules 
-                (name, description, format, frequency, day_of_week, hour_of_day, 
-                 window_days, incident_limit, recipients, enabled, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                RETURNING id, name, description, format, frequency, day_of_week, hour_of_day,
-                          window_days, incident_limit, recipients, enabled, last_run, next_run, 
+                (name, description, format, frequency, day_of_week, day_of_month, hour_of_day, 
+                 window_days, incident_limit, recipients, enabled, next_run, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                RETURNING id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
+                          window_days, incident_limit, recipients, enabled, last_run, next_run,
                           created_at, updated_at
                 """,
                 (
-                    body.name,
-                    body.description,
-                    body.format,
-                    body.frequency,
-                    body.day_of_week,
-                    body.hour_of_day,
-                    body.window_days,
-                    body.incident_limit,
-                    body.recipients,
-                    body.enabled,
+                    schedule["name"],
+                    schedule.get("description"),
+                    schedule["format"],
+                    schedule["frequency"],
+                    schedule.get("day_of_week"),
+                    schedule.get("day_of_month"),
+                    schedule["hour_of_day"],
+                    schedule["window_days"],
+                    schedule["incident_limit"],
+                    schedule.get("recipients"),
+                    schedule["enabled"],
+                    schedule.get("next_run"),
                 ),
             )
             row = cur.fetchone()
@@ -1663,7 +1763,7 @@ def list_report_schedules(_admin=Depends(require_internal_admin_token)):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, description, format, frequency, day_of_week, hour_of_day,
+                SELECT id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
                        window_days, incident_limit, recipients, enabled, last_run, next_run,
                        created_at, updated_at
                 FROM report_schedules
@@ -1681,7 +1781,7 @@ def get_report_schedule(schedule_id: int, _admin=Depends(require_internal_admin_
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, description, format, frequency, day_of_week, hour_of_day,
+                SELECT id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
                        window_days, incident_limit, recipients, enabled, last_run, next_run,
                        created_at, updated_at
                 FROM report_schedules
@@ -1702,53 +1802,66 @@ def update_report_schedule(
     _admin=Depends(require_internal_admin_token),
 ):
     """Update a board report export schedule."""
-    updates = {}
-    if body.name is not None:
-        updates["name"] = body.name
-    if body.description is not None:
-        updates["description"] = body.description
-    if body.format is not None:
-        updates["format"] = body.format
-    if body.frequency is not None:
-        updates["frequency"] = body.frequency
-    if body.day_of_week is not None:
-        updates["day_of_week"] = body.day_of_week
-    if body.hour_of_day is not None:
-        updates["hour_of_day"] = body.hour_of_day
-    if body.window_days is not None:
-        updates["window_days"] = body.window_days
-    if body.incident_limit is not None:
-        updates["incident_limit"] = body.incident_limit
-    if body.recipients is not None:
-        updates["recipients"] = body.recipients
-    if body.enabled is not None:
-        updates["enabled"] = body.enabled
+    updates = body.model_dump(exclude_unset=True)
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    updates["updated_at"] = "NOW()"
-    set_clause = ", ".join([f"{k} = %s" for k in updates.keys() if k != "updated_at"])
-    set_clause += ", updated_at = NOW()"
-    values = [v for k, v in updates.items() if k != "updated_at"]
-    values.append(schedule_id)
-
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"""
-                UPDATE report_schedules
-                SET {set_clause}
+                """
+                SELECT id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
+                       window_days, incident_limit, recipients, enabled, last_run, next_run,
+                       created_at, updated_at
+                FROM report_schedules
                 WHERE id = %s
-                RETURNING id, name, description, format, frequency, day_of_week, hour_of_day,
+                """,
+                (schedule_id,),
+            )
+            existing = cur.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+
+            normalized = normalize_report_schedule_payload(updates, existing=existing)
+            cur.execute(
+                """
+                UPDATE report_schedules
+                SET name = %s,
+                    description = %s,
+                    format = %s,
+                    frequency = %s,
+                    day_of_week = %s,
+                    day_of_month = %s,
+                    hour_of_day = %s,
+                    window_days = %s,
+                    incident_limit = %s,
+                    recipients = %s,
+                    enabled = %s,
+                    next_run = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
                           window_days, incident_limit, recipients, enabled, last_run, next_run,
                           created_at, updated_at
                 """,
-                values,
+                (
+                    normalized["name"],
+                    normalized.get("description"),
+                    normalized["format"],
+                    normalized["frequency"],
+                    normalized.get("day_of_week"),
+                    normalized.get("day_of_month"),
+                    normalized["hour_of_day"],
+                    normalized["window_days"],
+                    normalized["incident_limit"],
+                    normalized.get("recipients"),
+                    normalized["enabled"],
+                    normalized.get("next_run"),
+                    schedule_id,
+                ),
             )
             row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Schedule not found")
             conn.commit()
             return ReportScheduleResponse(**row)
 
