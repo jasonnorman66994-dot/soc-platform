@@ -10,6 +10,8 @@ import hashlib
 import secrets
 import io
 import csv
+import math
+import re
 from pathlib import Path
 from typing import Literal, Any
 from uuid import uuid4
@@ -920,10 +922,272 @@ class SoarPolicyUpdateBody(BaseModel):
 
 class VoiceCommandBody(BaseModel):
     command: str = Field(..., min_length=2, max_length=200)
+    context_user: str | None = Field(default=None, max_length=128)
+    target_tenant: str | None = Field(default=None, max_length=128)
+    percent_delta: float | None = Field(default=None, ge=0.1, le=100)
+    confirm: bool = False
+
+
+class ThresholdUpdateBody(BaseModel):
+    target_tenant: str | None = Field(default=None, max_length=128)
+    percent_delta: float = Field(..., ge=0.1, le=100)
+    confirm: bool = False
+
+
+class TelemetryEvent(BaseModel):
+    agent_id: str = Field(min_length=2, max_length=128)
+    hostname: str = Field(min_length=1, max_length=256)
+    event_type: str = Field(min_length=2, max_length=64)  # process_start | network_connection | heartbeat
+    timestamp: str | None = None
+    user_id: str | None = Field(default=None, max_length=128)
+    pid: int | None = None
+    process_name: str | None = Field(default=None, max_length=256)
+    remote_ip: str | None = Field(default=None, max_length=64)
+    remote_port: int | None = None
+    local_port: int | None = None
+    meta: dict | None = None
+
+
+class DrillRequest(BaseModel):
+    drill_type: str = Field(min_length=2, max_length=64)  # brute_force | phishing_sim | ghost_mode_test | jit_test
+    target_user: str | None = Field(default=None, max_length=128)
+    iterations: int = Field(default=5, ge=1, le=50)
 
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Threat Intelligence Service (The Oracle)
+# ---------------------------------------------------------------------------
+_THREAT_INTEL_FEED: dict[str, dict] = {}  # ip -> {source, category, risk, last_seen}
+_THREAT_INTEL_LAST_POLL: float = 0.0
+_THREAT_INTEL_POLL_INTERVAL = 300  # seconds
+
+# Mock global blocklist (simulates AlienVault OTX / abuse.ch feeds)
+_MOCK_THREAT_FEED = {
+    "198.51.100.1": {"source": "AlienVault OTX", "category": "C2", "risk": 100, "tags": ["botnet", "c2-server"]},
+    "203.0.113.66": {"source": "abuse.ch", "category": "malware", "risk": 100, "tags": ["ransomware", "dropper"]},
+    "192.0.2.99": {"source": "AlienVault OTX", "category": "scanner", "risk": 85, "tags": ["mass-scanner"]},
+    "198.51.100.200": {"source": "ThreatFox", "category": "phishing", "risk": 95, "tags": ["credential-harvester"]},
+    "203.0.113.42": {"source": "abuse.ch", "category": "brute_force", "risk": 90, "tags": ["ssh-bruteforce"]},
+}
+
+
+def poll_threat_intel_feed() -> dict[str, dict]:
+    """Poll global threat intel feed. Returns current feed state."""
+    global _THREAT_INTEL_LAST_POLL
+    import time as _time
+    now = _time.time()
+    if now - _THREAT_INTEL_LAST_POLL < _THREAT_INTEL_POLL_INTERVAL and _THREAT_INTEL_FEED:
+        return _THREAT_INTEL_FEED
+    # In production: fetch from AlienVault OTX API, abuse.ch, etc.
+    _THREAT_INTEL_FEED.clear()
+    _THREAT_INTEL_FEED.update(_MOCK_THREAT_FEED)
+    _THREAT_INTEL_LAST_POLL = now
+    return _THREAT_INTEL_FEED
+
+
+def _upsert_shared_threat(ip: str, source_tenant: str, category: str, risk: int, reason: str, source: str = "Sovereign Diplomat") -> None:
+    """Promote a critical indicator into shared herd-immunity intelligence."""
+    if not ip:
+        return
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO shared_threats (ip, source_tenant, category, risk, status, source, reason, first_seen, last_seen, meta)
+                VALUES (%s, %s, %s, %s, 'critical', %s, %s, NOW(), NOW(), %s)
+                ON CONFLICT (ip)
+                DO UPDATE SET
+                    source_tenant=EXCLUDED.source_tenant,
+                    category=EXCLUDED.category,
+                    risk=GREATEST(shared_threats.risk, EXCLUDED.risk),
+                    status='critical',
+                    source=EXCLUDED.source,
+                    reason=EXCLUDED.reason,
+                    last_seen=NOW(),
+                    meta=COALESCE(shared_threats.meta, '{}'::jsonb) || COALESCE(EXCLUDED.meta, '{}'::jsonb)
+                """,
+                (ip, source_tenant, category, risk, source, reason, json.dumps({"shared_intelligence": True})),
+            )
+        conn.commit()
+
+
+def _get_shared_threat(ip: str | None) -> dict | None:
+    if not ip:
+        return None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ip, source_tenant, category, risk, status, source, reason, last_seen
+                FROM shared_threats
+                WHERE ip=%s
+                  AND status='critical'
+                LIMIT 1
+                """,
+                (ip,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "source": row.get("source") or "Sovereign Diplomat",
+        "category": row.get("category") or "shared_critical",
+        "risk": int(row.get("risk") or 100),
+        "tags": ["shared-intelligence", "diplomat"],
+        "shared_intelligence": True,
+        "shared_source_tenant": row.get("source_tenant"),
+        "reason": row.get("reason") or "critical threat propagated across tenants",
+    }
+
+
+def check_threat_intel(ip: str | None) -> dict | None:
+    """Check if an IP matches global feed or shared sovereign threat intelligence."""
+    if not ip:
+        return None
+    shared = _get_shared_threat(ip)
+    if shared:
+        return shared
+    feed = poll_threat_intel_feed()
+    return feed.get(ip)
+
+
+def _safe_stddev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / len(values)
+    return math.sqrt(variance)
+
+
+def _telemetry_frequency_zscore(tenant_id: str, user_id: str, event_type: str, now_ts: datetime) -> tuple[float, dict]:
+    """Calculate z-score for telemetry hourly frequency against 7-day user baseline."""
+    current_hour = now_ts.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    baseline_map = {
+        (current_hour - timedelta(hours=i)).isoformat(): 0
+        for i in range(0, 168)
+    }
+
+    for item in _TELEMETRY_BUFFER:
+        if item.get("tenant_id") != tenant_id:
+            continue
+        if item.get("event_type") != event_type:
+            continue
+        if item.get("user_id") != user_id:
+            continue
+
+        ts_raw = item.get("timestamp")
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        hour_key = ts.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+        if hour_key in baseline_map:
+            baseline_map[hour_key] = baseline_map.get(hour_key, 0) + 1
+
+    values = list(reversed(list(baseline_map.values())))
+    current_hour_count = baseline_map.get(current_hour.isoformat(), 0)
+    mean = sum(values) / len(values)
+    stddev = _safe_stddev([float(v) for v in values])
+    if stddev <= 0:
+        return 0.0, {"mean": mean, "stddev": stddev, "current": current_hour_count, "sample_size": len(values)}
+
+    z_score = (current_hour_count - mean) / stddev
+    return z_score, {"mean": mean, "stddev": stddev, "current": current_hour_count, "sample_size": len(values)}
+
+
+def _event_frequency_zscore(tenant_id: str, user_id: str, event_type: str) -> tuple[float, dict]:
+    """Calculate z-score for events table hourly frequency against 7-day user baseline."""
+    now_hour = now_utc().astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    baseline_map = {
+        (now_hour - timedelta(hours=i)).isoformat(): 0
+        for i in range(0, 168)
+    }
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT date_trunc('hour', timestamp) AS hour_bucket, COUNT(*) AS cnt
+                FROM events
+                WHERE tenant_id=%s
+                  AND user_id=%s
+                  AND type=%s
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY hour_bucket
+                ORDER BY hour_bucket ASC
+                """,
+                (tenant_id, user_id, event_type),
+            )
+            rows = cur.fetchall()
+
+    for row in rows:
+        hour = row.get("hour_bucket")
+        if hasattr(hour, "isoformat"):
+            key = hour.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+            if key in baseline_map:
+                baseline_map[key] = int(row.get("cnt") or 0)
+
+    values = list(reversed(list(baseline_map.values())))
+    current = baseline_map.get(now_hour.isoformat(), 0)
+    mean = sum(values) / len(values)
+    stddev = _safe_stddev([float(v) for v in values])
+    if stddev <= 0:
+        return 0.0, {"mean": mean, "stddev": stddev, "current": current, "sample_size": len(values)}
+
+    z_score = (current - mean) / stddev
+    return z_score, {"mean": mean, "stddev": stddev, "current": current, "sample_size": len(values)}
+
+
+# ---------------------------------------------------------------------------
+# Distributed Agent Registry (The Hunter)
+# ---------------------------------------------------------------------------
+_REGISTERED_AGENTS: dict[str, dict[str, dict]] = {}  # tenant_id -> agent_id -> {hostname, last_seen, status, event_count}
+_TELEMETRY_BUFFER: list[dict] = []  # recent telemetry events (capped)
+_TELEMETRY_BUFFER_MAX = 500
+
+
+def register_agent_heartbeat(agent_id: str, hostname: str, tenant_id: str = "default"):
+    """Update agent registry with heartbeat (tenant-scoped)."""
+    if tenant_id not in _REGISTERED_AGENTS:
+        _REGISTERED_AGENTS[tenant_id] = {}
+    _REGISTERED_AGENTS[tenant_id][agent_id] = {
+        "hostname": hostname,
+        "last_seen": now_utc().isoformat(),
+        "status": "active",
+        "event_count": _REGISTERED_AGENTS.get(tenant_id, {}).get(agent_id, {}).get("event_count", 0),
+    }
+
+
+def buffer_telemetry(event: dict):
+    """Add telemetry event to buffer."""
+    _TELEMETRY_BUFFER.append(event)
+    if len(_TELEMETRY_BUFFER) > _TELEMETRY_BUFFER_MAX:
+        del _TELEMETRY_BUFFER[:len(_TELEMETRY_BUFFER) - _TELEMETRY_BUFFER_MAX]
+    agent_id = event.get("agent_id")
+    tenant_id = event.get("tenant_id", "default")
+    if agent_id and tenant_id in _REGISTERED_AGENTS and agent_id in _REGISTERED_AGENTS[tenant_id]:
+        _REGISTERED_AGENTS[tenant_id][agent_id]["event_count"] = _REGISTERED_AGENTS[tenant_id][agent_id].get("event_count", 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Simulation Engine (The Architect) — drill tracking
+# ---------------------------------------------------------------------------
+_DRILL_HISTORY: dict[str, list[dict]] = {}  # tenant_id -> list of drill results
+_DRILL_HISTORY_MAX = 100
+
+
+def record_drill(drill: dict, tenant_id: str = "default"):
+    if tenant_id not in _DRILL_HISTORY:
+        _DRILL_HISTORY[tenant_id] = []
+    _DRILL_HISTORY[tenant_id].append(drill)
+    if len(_DRILL_HISTORY[tenant_id]) > _DRILL_HISTORY_MAX:
+        del _DRILL_HISTORY[tenant_id][:len(_DRILL_HISTORY[tenant_id]) - _DRILL_HISTORY_MAX]
 
 
 # ---------------------------------------------------------------------------
@@ -1385,10 +1649,24 @@ def init_db():
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
+                CREATE TABLE IF NOT EXISTS shared_threats (
+                    ip TEXT PRIMARY KEY,
+                    source_tenant TEXT,
+                    category TEXT,
+                    risk INT NOT NULL DEFAULT 100,
+                    status TEXT NOT NULL DEFAULT 'critical',
+                    source TEXT,
+                    reason TEXT,
+                    first_seen TIMESTAMPTZ DEFAULT NOW(),
+                    last_seen TIMESTAMPTZ DEFAULT NOW(),
+                    meta JSONB DEFAULT '{}'::jsonb
+                );
+
                 ALTER TABLE lead_captures ADD COLUMN IF NOT EXISTS tenant_id TEXT;
                 ALTER TABLE lead_captures ADD COLUMN IF NOT EXISTS converted_to_signup BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS day_of_month INTEGER;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_events_event_id ON billing_events (stripe_event_id) WHERE stripe_event_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_shared_threats_status_risk ON shared_threats (status, risk DESC, last_seen DESC);
 
                 ALTER TABLE events ADD COLUMN IF NOT EXISTS tenant_id TEXT;
                 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS tenant_id TEXT;
@@ -2666,13 +2944,76 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
     ).get(event.user_id)
 
     ml_risk_boost = 0
+    risk_score = 0
+    patterns = []
+    _ml_boost_result = {"anomalies": []}
+
+    # Threat Intel check: if IP matches known bad actor, force max risk + JIT revoke.
+    _threat_match = check_threat_intel(event.ip)
+    if _threat_match:
+        risk_score = 100
+        ml_risk_boost = max(ml_risk_boost, 15)
+        if event.user_id:
+            jit_revoke_user_sessions(tenant_id, event.user_id, reason="threat_intel_match")
+        log_action(tenant_id, None, "threat_intel.match", f"events/{saved_event['id']}", {
+            "ip": event.ip,
+            "source": _threat_match.get("source"),
+            "category": _threat_match.get("category"),
+            "tags": _threat_match.get("tags"),
+            "shared_intelligence": bool(_threat_match.get("shared_intelligence")),
+        })
+        if int(_threat_match.get("risk") or 0) >= 90 and event.ip:
+            _upsert_shared_threat(
+                event.ip,
+                source_tenant=tenant_id,
+                category=_threat_match.get("category") or "unknown",
+                risk=int(_threat_match.get("risk") or 100),
+                reason="Critical indicator observed in tenant ingest",
+            )
+
+    # Diplomat: any critical incident IP is promoted to shared blocklist across tenants.
+    if incident_row and (incident_row.get("severity") or "").lower() == "critical" and event.ip:
+        _upsert_shared_threat(
+            event.ip,
+            source_tenant=tenant_id,
+            category="critical_incident",
+            risk=100,
+            reason="IP linked to critical incident in tenant",
+        )
+
+    # Sentinel: telemetry event z-score > 3σ auto-enables ghost mode.
+    if event.user_id and event.event_type in ("process_start", "network_connection", "net_connect"):
+        sentinel_z, sentinel_baseline = _event_frequency_zscore(tenant_id, event.user_id, event.event_type)
+        if sentinel_z > 3.0:
+            policy = _get_or_create_soar_policy(tenant_id)
+            if not policy.get("ghost_mode"):
+                policy["ghost_mode"] = True
+                _save_soar_policy(tenant_id, policy)
+            log_action(tenant_id, None, "sentinel.baseline_deviation", f"events/{saved_event['id']}", {
+                "user_id": event.user_id,
+                "event_type": event.event_type,
+                "z_score": round(sentinel_z, 2),
+                "baseline": sentinel_baseline,
+                "auto_ghost_mode": True,
+                "reason": "Deviation > 3σ from 7-day baseline",
+            })
+            if incident_row and incident_row.get("severity") in ("critical", "high"):
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE incidents SET status='sandboxed' WHERE id=%s AND tenant_id=%s",
+                            (incident_row["id"], tenant_id),
+                        )
+                    conn.commit()
+                incident_row["status"] = "sandboxed"
+
     if context:
         patterns = _detect_behavior_patterns(context)
         user_alerts = [
             {"severity": item.get("severity"), "summary": item.get("summary")}
             for item in alert_rows
         ]
-        risk_score = _calculate_context_risk(context, user_alerts, patterns)
+        risk_score = max(risk_score, _calculate_context_risk(context, user_alerts, patterns))
         # ML anomaly boost: if this user is a statistical outlier in recent traffic, raise risk score
         _ml_boost_result = detect_ml_anomalies(events=[
             {"id": item.get("id"), "user_id": item.get("user_id"),
@@ -3526,6 +3867,90 @@ def jit_status_endpoint(
 # Voice Command Endpoint
 # ---------------------------------------------------------------------------
 
+
+def _resolve_tenant_alias(raw_alias: str | None, fallback_tenant: str) -> str:
+    if not raw_alias:
+        return fallback_tenant
+    cleaned = raw_alias.strip().lower().replace(" ", "-").replace("_", "-")
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM tenants WHERE lower(id)=lower(%s) OR lower(name)=lower(%s) LIMIT 1",
+                (cleaned, raw_alias.strip()),
+            )
+            row = cur.fetchone()
+    return (row or {}).get("id") or fallback_tenant
+
+
+def _latest_isolated_user(tenant_id: str) -> str | None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT resource
+                FROM audit_logs
+                WHERE tenant_id=%s
+                  AND action='jit.revoke'
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+    resource = (row or {}).get("resource") or ""
+    if resource.startswith("users/"):
+        return resource.split("/", 1)[1]
+    return None
+
+
+def _build_isolation_reasoning(tenant_id: str, user_id: str) -> list[str]:
+    reasons: list[str] = []
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action, resource, meta, timestamp
+                FROM audit_logs
+                WHERE tenant_id=%s
+                  AND (
+                    resource=%s
+                    OR action IN ('threat_intel.match', 'sentinel.baseline_deviation', 'soar.auto_playbook', 'jit.revoke')
+                  )
+                ORDER BY timestamp DESC
+                LIMIT 120
+                """,
+                (tenant_id, f"users/{user_id}"),
+            )
+            rows = cur.fetchall()
+
+    for row in rows:
+        action = row.get("action") or ""
+        meta = row.get("meta") or {}
+        if action == "jit.revoke":
+            r = meta.get("reason") or "automated response"
+            reasons.append(f"JIT isolation triggered ({r})")
+        elif action == "sentinel.baseline_deviation" and (meta.get("user_id") == user_id or not meta.get("user_id")):
+            z = meta.get("z_score")
+            reasons.append(f"Baseline deviation detected by Sentinel (z-score {z})")
+        elif action == "threat_intel.match":
+            ip = meta.get("ip") or "unknown"
+            cat = meta.get("category") or "unknown"
+            shared = " via shared intelligence" if meta.get("shared_intelligence") else ""
+            reasons.append(f"Threat Intel matched IP {ip} ({cat}){shared}")
+        elif action == "soar.auto_playbook":
+            patterns = meta.get("patterns") or []
+            if "IMPOSSIBLE_TRAVEL_CHAIN" in patterns:
+                reasons.append("Geo-shift detected (impossible travel pattern)")
+            if "ACCOUNT_TAKEOVER" in patterns:
+                reasons.append("Account takeover pattern detected")
+
+    unique: list[str] = []
+    for reason in reasons:
+        if reason not in unique:
+            unique.append(reason)
+    return unique[:6]
+
+
 @app.post("/voice/command")
 async def voice_command_endpoint(
     body: VoiceCommandBody,
@@ -3537,7 +3962,6 @@ async def voice_command_endpoint(
     result: dict = {"command": command, "status": "unknown"}
 
     if command in ("lock_down", "lockdown"):
-        # Set all playbook min_risk to 0 → maximum auto-response aggression
         policy = _get_or_create_soar_policy(tenant_id)
         for pb in policy.get("playbooks", {}).values():
             pb["enabled"] = True
@@ -3577,11 +4001,442 @@ async def voice_command_endpoint(
         _save_soar_policy(tenant_id, policy)
         result = {"command": "disable_ghost_mode", "status": "disabled"}
 
+    elif command in ("run_security_drill", "security_drill", "run_drill"):
+        drill_result = await _execute_security_drill(tenant_id, "brute_force", user, iterations=5)
+        result = {"command": "run_security_drill", "status": "completed", "drill": drill_result}
+
+    elif command in ("why_was_this_user_isolated", "why_user_isolated", "why_is_this_user_isolated"):
+        target_user = body.context_user or _latest_isolated_user(tenant_id)
+        if not target_user:
+            result = {
+                "command": command,
+                "status": "no_target",
+                "detail": "No isolated user found. Provide context_user to explain reasoning.",
+            }
+        else:
+            reasons = _build_isolation_reasoning(tenant_id, target_user)
+            result = {
+                "command": "why_was_this_user_isolated",
+                "status": "explained",
+                "target_user": target_user,
+                "reasoning": reasons or ["No direct isolation rationale found in current audit trail."],
+            }
+
+    elif command.startswith("lower_threshold"):
+        parsed = re.search(r"lower_threshold_for_([a-z0-9\-_]+)_by_(\d+)_percent", command)
+        target_raw = body.target_tenant or (parsed.group(1) if parsed else None)
+        percent_delta = body.percent_delta if body.percent_delta is not None else (float(parsed.group(2)) if parsed else 10.0)
+        target = _resolve_tenant_alias(target_raw, tenant_id)
+
+        if target != tenant_id and (user.get("role") or "") not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Cross-tenant policy updates require owner/admin role")
+
+        policy = _get_or_create_soar_policy(target)
+        old_default = int(policy.get("default_risk_threshold") or 85)
+        old_ml = float(policy.get("ml_risk_threshold") or 5.0)
+        new_default = max(0, int(round(old_default * (1 - (percent_delta / 100.0)))))
+        new_ml = max(0.0, round(old_ml * (1 - (percent_delta / 100.0)), 2))
+
+        if not body.confirm:
+            result = {
+                "command": "lower_threshold",
+                "status": "pending_confirmation",
+                "target_tenant": target,
+                "proposed": {
+                    "default_risk_threshold": {"from": old_default, "to": new_default},
+                    "ml_risk_threshold": {"from": old_ml, "to": new_ml},
+                },
+                "detail": "Repeat with confirm=true to apply policy update.",
+            }
+        else:
+            policy["default_risk_threshold"] = new_default
+            policy["ml_risk_threshold"] = new_ml
+            _save_soar_policy(target, policy)
+            result = {
+                "command": "lower_threshold",
+                "status": "applied",
+                "target_tenant": target,
+                "default_risk_threshold": new_default,
+                "ml_risk_threshold": new_ml,
+            }
+            log_action(tenant_id, user["id"], "voice.policy_update", f"tenants/{target}", {
+                "operation": "lower_threshold",
+                "percent_delta": percent_delta,
+                "from_default": old_default,
+                "to_default": new_default,
+                "from_ml": old_ml,
+                "to_ml": new_ml,
+            })
+
     else:
-        result = {"command": command, "status": "unrecognized", "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode"}
+        result = {
+            "command": command,
+            "status": "unrecognized",
+            "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill, why_was_this_user_isolated, lower_threshold_for_<tenant>_by_<percent>_percent",
+        }
 
     log_action(tenant_id, user["id"], "voice.command", "voice", {"command": command, "result_status": result.get("status")})
     return result
+
+
+@app.post("/policy/threshold-update")
+def update_policy_threshold(
+    body: ThresholdUpdateBody,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    target = _resolve_tenant_alias(body.target_tenant, tenant_id)
+
+    if target != tenant_id and (user.get("role") or "") not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Cross-tenant policy updates require owner/admin role")
+
+    policy = _get_or_create_soar_policy(target)
+    old_default = int(policy.get("default_risk_threshold") or 85)
+    old_ml = float(policy.get("ml_risk_threshold") or 5.0)
+    percent_delta = float(body.percent_delta)
+    new_default = max(0, int(round(old_default * (1 - (percent_delta / 100.0)))))
+    new_ml = max(0.0, round(old_ml * (1 - (percent_delta / 100.0)), 2))
+
+    proposal = {
+        "default_risk_threshold": {"from": old_default, "to": new_default},
+        "ml_risk_threshold": {"from": old_ml, "to": new_ml},
+    }
+    if not body.confirm:
+        return {
+            "status": "pending_confirmation",
+            "target_tenant": target,
+            "proposed": proposal,
+            "detail": "Repeat with confirm=true to apply policy update.",
+        }
+
+    policy["default_risk_threshold"] = new_default
+    policy["ml_risk_threshold"] = new_ml
+    _save_soar_policy(target, policy)
+    log_action(tenant_id, user["id"], "policy.threshold_update", f"tenants/{target}", {
+        "percent_delta": percent_delta,
+        "from_default": old_default,
+        "to_default": new_default,
+        "from_ml": old_ml,
+        "to_ml": new_ml,
+        "confirmed": True,
+    })
+    return {
+        "status": "applied",
+        "target_tenant": target,
+        "default_risk_threshold": new_default,
+        "ml_risk_threshold": new_ml,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Telemetry Ingest — Distributed Agent Data (The Hunter)
+# ---------------------------------------------------------------------------
+
+@app.post("/telemetry/ingest")
+async def telemetry_ingest(
+    events: list[TelemetryEvent],
+    tenant_id: str = Depends(get_tenant),
+    _key=Depends(validate_api_key),
+):
+    """Ingest telemetry from distributed agents (process starts, network connections)."""
+    processed = 0
+    threat_matches = []
+    sentinel_triggers = []
+    for ev in events:
+        register_agent_heartbeat(ev.agent_id, ev.hostname, tenant_id)
+        effective_user = ev.user_id or ((ev.meta or {}).get("user_id") if isinstance(ev.meta, dict) else None)
+        entry = {
+            "agent_id": ev.agent_id,
+            "hostname": ev.hostname,
+            "event_type": ev.event_type,
+            "timestamp": ev.timestamp or now_utc().isoformat(),
+            "user_id": effective_user,
+            "pid": ev.pid,
+            "process_name": ev.process_name,
+            "remote_ip": ev.remote_ip,
+            "remote_port": ev.remote_port,
+            "local_port": ev.local_port,
+            "tenant_id": tenant_id,
+            "meta": ev.meta,
+        }
+        buffer_telemetry(entry)
+
+        # Sentinel: adaptive baseline z-score for telemetry process/network frequency.
+        if effective_user and ev.event_type in ("process_start", "network_connection", "net_connect"):
+            z_score, baseline = _telemetry_frequency_zscore(tenant_id, effective_user, ev.event_type, now_utc())
+            if z_score > 3.0:
+                policy = _get_or_create_soar_policy(tenant_id)
+                if not policy.get("ghost_mode"):
+                    policy["ghost_mode"] = True
+                    _save_soar_policy(tenant_id, policy)
+                sentinel_triggers.append({
+                    "user_id": effective_user,
+                    "event_type": ev.event_type,
+                    "z_score": round(z_score, 2),
+                })
+                log_action(tenant_id, None, "sentinel.baseline_deviation", f"agents/{ev.agent_id}", {
+                    "user_id": effective_user,
+                    "event_type": ev.event_type,
+                    "z_score": round(z_score, 2),
+                    "baseline": baseline,
+                    "auto_ghost_mode": True,
+                    "reason": "Deviation > 3σ from 7-day baseline",
+                })
+
+        # Threat Intel cross-reference for network connections
+        if ev.remote_ip:
+            match = check_threat_intel(ev.remote_ip)
+            if match:
+                threat_matches.append({"ip": ev.remote_ip, **match, "agent_id": ev.agent_id})
+                log_action(tenant_id, None, "threat_intel.agent_match", f"agents/{ev.agent_id}", {
+                    "ip": ev.remote_ip, "source": match.get("source"),
+                    "category": match.get("category"), "hostname": ev.hostname,
+                    "shared_intelligence": bool(match.get("shared_intelligence")),
+                })
+                # Diplomat: herd immunity propagation for critical threats.
+                if int(match.get("risk") or 0) >= 90:
+                    _upsert_shared_threat(
+                        ev.remote_ip,
+                        source_tenant=tenant_id,
+                        category=match.get("category") or "unknown",
+                        risk=int(match.get("risk") or 100),
+                        reason="Critical indicator observed via telemetry ingest",
+                    )
+        processed += 1
+
+    if threat_matches:
+        await broadcast(tenant_id, {
+            "kind": "threat_intel_alert",
+            "matches": threat_matches[:10],
+            "count": len(threat_matches),
+        })
+    if sentinel_triggers:
+        await broadcast(tenant_id, {
+            "kind": "sentinel_baseline_deviation",
+            "count": len(sentinel_triggers),
+            "triggers": sentinel_triggers[:10],
+        })
+
+    return {
+        "processed": processed,
+        "threat_matches": len(threat_matches),
+        "sentinel_triggers": len(sentinel_triggers),
+        "agents_active": len(_REGISTERED_AGENTS.get(tenant_id, {})),
+    }
+
+
+@app.get("/agents/status")
+def get_agent_status(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get status of all registered distributed agents."""
+    tenant_agents = _REGISTERED_AGENTS.get(tenant_id, {})
+    agents = []
+    for agent_id, info in tenant_agents.items():
+        last_seen = info.get("last_seen", "")
+        agents.append({
+            "agent_id": agent_id,
+            "hostname": info.get("hostname"),
+            "last_seen": last_seen,
+            "status": info.get("status", "unknown"),
+            "event_count": info.get("event_count", 0),
+        })
+    return {"agents": agents, "total": len(agents)}
+
+
+@app.get("/telemetry/recent")
+def get_recent_telemetry(
+    limit: int = 50,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get recent telemetry events from distributed agents."""
+    safe_limit = max(1, min(limit, 200))
+    filtered = [e for e in reversed(_TELEMETRY_BUFFER) if e.get("tenant_id") == tenant_id][:safe_limit]
+    return {"events": filtered, "total_buffered": len(_TELEMETRY_BUFFER)}
+
+
+# ---------------------------------------------------------------------------
+# Threat Intelligence Service (The Oracle)
+# ---------------------------------------------------------------------------
+
+@app.get("/threat-intel/feed")
+def get_threat_intel_feed(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get current global threat intelligence feed, including shared sovereign intelligence."""
+    feed = poll_threat_intel_feed()
+    indicators: dict[str, dict] = {}
+    for ip, info in feed.items():
+        indicators[ip] = {
+            "ip": ip,
+            "source": info.get("source"),
+            "category": info.get("category"),
+            "risk": info.get("risk"),
+            "tags": info.get("tags", []),
+            "shared_intelligence": False,
+        }
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ip, source_tenant, category, risk, source, reason
+                FROM shared_threats
+                WHERE status='critical'
+                ORDER BY risk DESC, last_seen DESC
+                LIMIT 500
+                """
+            )
+            shared_rows = cur.fetchall()
+
+    for row in shared_rows:
+        ip = row.get("ip")
+        if not ip:
+            continue
+        existing = indicators.get(ip, {"ip": ip, "tags": []})
+        merged_tags = list(dict.fromkeys([*(existing.get("tags") or []), "shared-intelligence", "diplomat"]))
+        indicators[ip] = {
+            "ip": ip,
+            "source": row.get("source") or existing.get("source") or "Sovereign Diplomat",
+            "category": row.get("category") or existing.get("category") or "shared_critical",
+            "risk": max(int(existing.get("risk") or 0), int(row.get("risk") or 100)),
+            "tags": merged_tags,
+            "shared_intelligence": True,
+            "shared_source_tenant": row.get("source_tenant"),
+            "shared_reason": row.get("reason"),
+        }
+
+    sorted_indicators = sorted(indicators.values(), key=lambda i: int(i.get("risk") or 0), reverse=True)
+    shared_count = sum(1 for i in sorted_indicators if i.get("shared_intelligence"))
+    return {
+        "indicators": sorted_indicators,
+        "total": len(sorted_indicators),
+        "shared_count": shared_count,
+        "feed_sources": ["AlienVault OTX", "abuse.ch", "ThreatFox", "Sovereign Diplomat"],
+    }
+
+
+@app.post("/threat-intel/check")
+def check_threat_intel_endpoint(
+    ip: str,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Check if a specific IP is in the threat intelligence feed."""
+    match = check_threat_intel(ip)
+    if match:
+        return {"ip": ip, "matched": True, **match}
+    return {"ip": ip, "matched": False}
+
+
+# ---------------------------------------------------------------------------
+# Simulation Engine — Security Drills (The Architect)
+# ---------------------------------------------------------------------------
+
+async def _execute_security_drill(
+    tenant_id: str,
+    drill_type: str,
+    user: dict,
+    target_user: str | None = None,
+    iterations: int = 5,
+) -> dict:
+    """Run a non-destructive security drill and validate system responses."""
+    drill_id = f"drill_{now_utc().strftime('%Y%m%d_%H%M%S')}_{drill_type}"
+    target = target_user or "drill.simulated.user"
+    results: dict = {
+        "drill_id": drill_id,
+        "drill_type": drill_type,
+        "target_user": target,
+        "iterations": iterations,
+        "started_at": now_utc().isoformat(),
+        "checks": {},
+    }
+
+    if drill_type == "brute_force":
+        # Simulate brute-force login attempts and explicitly exercise the JIT revocation path
+        for i in range(iterations):
+            log_action(tenant_id, None, "drill.brute_force_attempt", f"users/{target}", {
+                "attempt": i + 1, "ip": f"198.51.100.{i + 10}", "drill_id": drill_id,
+            })
+        jit_revoke_user_sessions(tenant_id, target, reason=f"drill_{drill_id}")
+        # Check: did JIT revocation engage?
+        jit_engaged = is_jit_revoked(tenant_id, target)
+        results["checks"]["jit_revocation"] = "pass" if jit_engaged else "not_triggered"
+        # Keep the drill non-destructive by restoring access after validation
+        if jit_engaged:
+            jit_reinstate_user(tenant_id, target)
+        # Check: is ghost mode available?
+        policy = _get_or_create_soar_policy(tenant_id)
+        results["checks"]["ghost_mode_available"] = "pass" if policy.get("ghost_mode") else "disabled"
+        results["checks"]["auto_response_enabled"] = "pass" if policy.get("auto_response_enabled") else "disabled"
+
+    elif drill_type == "phishing_sim":
+        # Simulate phishing event ingest
+        log_action(tenant_id, None, "drill.phishing_sim", f"users/{target}", {"drill_id": drill_id})
+        policy = _get_or_create_soar_policy(tenant_id)
+        pb = (policy.get("playbooks") or {}).get("phishing", {})
+        results["checks"]["phishing_playbook_enabled"] = "pass" if pb.get("enabled") else "disabled"
+        results["checks"]["deception_enabled"] = "pass" if pb.get("deception_enabled") else "disabled"
+
+    elif drill_type == "ghost_mode_test":
+        policy = _get_or_create_soar_policy(tenant_id)
+        results["checks"]["ghost_mode_enabled"] = "pass" if policy.get("ghost_mode") else "disabled"
+        for pb_name, pb_conf in (policy.get("playbooks") or {}).items():
+            results["checks"][f"deception_{pb_name}"] = "pass" if pb_conf.get("deception_enabled") else "disabled"
+
+    elif drill_type == "jit_test":
+        # Temporarily revoke and reinstate to verify JIT pipeline
+        jit_revoke_user_sessions(tenant_id, target, reason=f"drill_{drill_id}")
+        results["checks"]["jit_revoke"] = "pass" if is_jit_revoked(tenant_id, target) else "fail"
+        jit_reinstate_user(tenant_id, target)
+        results["checks"]["jit_reinstate"] = "pass" if not is_jit_revoked(tenant_id, target) else "fail"
+
+    else:
+        results["checks"]["unknown_drill_type"] = "fail"
+
+    # Score the drill
+    checks = results["checks"]
+    total_checks = len(checks)
+    passed = sum(1 for v in checks.values() if v == "pass")
+    results["completed_at"] = now_utc().isoformat()
+    results["score"] = f"{passed}/{total_checks}"
+    results["success_rate"] = round(passed / total_checks * 100, 1) if total_checks else 0.0
+    results["overall"] = "pass" if passed == total_checks else "partial" if passed > 0 else "fail"
+
+    record_drill(results, tenant_id)
+    log_action(tenant_id, user.get("id"), "drill.completed", f"drills/{drill_id}", {
+        "drill_id": drill_id, "drill_type": drill_type, "score": results["score"], "overall": results["overall"],
+    })
+    await broadcast(tenant_id, {"kind": "drill_completed", "drill_id": drill_id, "overall": results["overall"], "score": results["score"]})
+
+    return results
+
+
+@app.post("/drills/run")
+async def run_security_drill(
+    body: DrillRequest,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Run a non-destructive security drill to validate system responses."""
+    valid_drills = {"brute_force", "phishing_sim", "ghost_mode_test", "jit_test"}
+    if body.drill_type not in valid_drills:
+        raise HTTPException(status_code=400, detail=f"Invalid drill type. Valid: {', '.join(sorted(valid_drills))}")
+    result = await _execute_security_drill(tenant_id, body.drill_type, user, body.target_user, body.iterations)
+    return result
+
+
+@app.get("/drills/history")
+def get_drill_history(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get history of security drill runs."""
+    tenant_drills = _DRILL_HISTORY.get(tenant_id, [])
+    return {"drills": list(reversed(tenant_drills)), "total": len(tenant_drills)}
 
 
 @app.put("/incidents/{incident_id}/status")
@@ -3655,6 +4510,54 @@ def add_incident_note(
     return note_entry
 
 
+def _build_behavioral_baseline_graph(tenant_id: str, user_id: str | None) -> dict:
+    if not user_id:
+        return {"user_id": None, "points": [], "z_scores": []}
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT date_trunc('day', timestamp) AS day_bucket, COUNT(*) AS cnt
+                FROM events
+                WHERE tenant_id=%s
+                  AND user_id=%s
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY day_bucket
+                ORDER BY day_bucket ASC
+                """,
+                (tenant_id, user_id),
+            )
+            rows = cur.fetchall()
+
+    counts = [int(r.get("cnt") or 0) for r in rows]
+    if not counts:
+        return {"user_id": user_id, "points": [], "z_scores": []}
+
+    mean = sum(counts) / len(counts)
+    stddev = _safe_stddev([float(v) for v in counts])
+    points = []
+    z_scores = []
+    for r in rows:
+        day = r.get("day_bucket")
+        cnt = int(r.get("cnt") or 0)
+        z = ((cnt - mean) / stddev) if stddev > 0 else 0.0
+        points.append({
+            "day": day.strftime("%Y-%m-%d") if hasattr(day, "strftime") else str(day)[:10],
+            "count": cnt,
+        })
+        z_scores.append(round(z, 2))
+
+    return {
+        "user_id": user_id,
+        "mean": round(mean, 2),
+        "stddev": round(stddev, 2),
+        "points": points,
+        "z_scores": z_scores,
+        "latest_z_score": z_scores[-1] if z_scores else 0.0,
+    }
+
+
 @app.get("/incidents/{incident_id}/timeline")
 def get_incident_timeline(
     incident_id: int,
@@ -3722,6 +4625,45 @@ def get_incident_timeline(
                 "risk_score": risk,
                 "actor": r.get("user_id") or "system",
             })
+        elif action.startswith("threat_intel."):
+            ip = meta.get("ip") or "unknown"
+            source = meta.get("source") or "unknown"
+            cat = meta.get("category") or "unknown"
+            shared = bool(meta.get("shared_intelligence"))
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "threat_intel",
+                "description": f"Threat Intel match: {ip} ({cat}) via {source}",
+                "ip": ip,
+                "threat_source": source,
+                "threat_category": cat,
+                "shared_intelligence": shared,
+                "actor": "system",
+            })
+        elif action.startswith("sentinel."):
+            z_score = meta.get("z_score")
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "sentinel",
+                "description": meta.get("reason") or f"Sentinel baseline deviation detected (z={z_score})",
+                "z_score": z_score,
+                "event_type": meta.get("event_type"),
+                "actor": "system",
+            })
+        elif action.startswith("drill."): 
+            drill_id = meta.get("drill_id") or ""
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "drill",
+                "description": meta.get("description") or f"Security drill: {action.replace('drill.', '')}",
+                "drill_id": drill_id,
+                "score": meta.get("score"),
+                "overall": meta.get("overall"),
+                "actor": r.get("user_id") or "system",
+            })
         else:
             timeline.append({
                 "timestamp": ts_iso,
@@ -3753,14 +4695,69 @@ def get_incident_timeline(
     # Enrich with Geo-IP and Identity context
     enriched_data = enrich_incident_context(dict(incident), None)
 
+    story = incident.get("story") or {}
+    if isinstance(story, str):
+        try:
+            story = json.loads(story)
+        except Exception:
+            story = {}
+    users = (story.get("users") if isinstance(story, dict) else None) or []
+    baseline_user = users[0] if users else incident.get("entity")
+    behavioral_baseline = _build_behavioral_baseline_graph(tenant_id, baseline_user)
+
     return {
         "incident_id": incident_id,
         "entity": incident.get("entity"),
         "status": incident.get("status"),
         "severity": incident.get("severity"),
         "enriched_data": enriched_data,
+        "behavioral_baseline": behavioral_baseline,
         "timeline": timeline,
         "event_count": len(timeline),
+    }
+
+
+@app.get("/incidents/{incident_id}/reasoning")
+def get_incident_reasoning(
+    incident_id: int,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, entity, status, severity, story, assigned_to, responded_at, first_seen, last_seen FROM incidents WHERE id=%s AND tenant_id=%s",
+                (incident_id, tenant_id),
+            )
+            incident = cur.fetchone()
+
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    story = incident.get("story") or {}
+    if isinstance(story, str):
+        try:
+            story = json.loads(story)
+        except Exception:
+            story = {}
+    users = (story.get("users") if isinstance(story, dict) else None) or []
+    reasoning_user = users[0] if users else incident.get("entity")
+    behavioral_baseline = _build_behavioral_baseline_graph(tenant_id, reasoning_user)
+    reasoning = _build_isolation_reasoning(tenant_id, reasoning_user) if reasoning_user else []
+    enriched_data = enrich_incident_context(dict(incident), None)
+    shared_intelligence = any("shared intelligence" in item.lower() for item in reasoning)
+
+    return {
+        "incident_id": incident_id,
+        "entity": incident.get("entity"),
+        "status": incident.get("status"),
+        "severity": incident.get("severity"),
+        "user_id": reasoning_user,
+        "isolation_reason": reasoning[0] if reasoning else "No direct isolation rationale found in current audit trail.",
+        "reasoning": reasoning,
+        "behavioral_baseline": behavioral_baseline,
+        "enriched_data": enriched_data,
+        "shared_intelligence": shared_intelligence,
     }
 
 

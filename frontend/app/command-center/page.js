@@ -421,11 +421,21 @@ export default function CommandCenterPage() {
       const transcript = lastResult[0].transcript.trim();
       setVoiceTranscript(transcript);
       const normalized = transcript.toLowerCase().replace(/\s+/g, "_");
+      const confirm = /\b(confirm|confirmed|yes_apply)\b/i.test(transcript);
+      const targetMatch = normalized.match(/lower_threshold_for_([a-z0-9\-_]+)_by_(\d+)_percent/);
+      const contextUser = incidentTimeline?.behavioral_baseline?.user_id || incidentTimeline?.entity || null;
+      const voicePayload = {
+        command: normalized,
+        confirm,
+        context_user: contextUser,
+        target_tenant: targetMatch ? targetMatch[1] : null,
+        percent_delta: targetMatch ? Number.parseFloat(targetMatch[2]) : null,
+      };
       try {
         const res = await fetch(`${API}/voice/command`, {
           method: "POST",
           headers: authHeaders,
-          body: JSON.stringify({ command: normalized }),
+          body: JSON.stringify(voicePayload),
         });
         const data = await res.json();
         setVoiceResult(data);
@@ -1622,11 +1632,39 @@ export default function CommandCenterPage() {
                 ) : null}
               </div>
             ) : null}
+
+            {incidentTimeline.behavioral_baseline?.points?.length ? (
+              <div style={{ ...miniCard, marginTop: 10, borderColor: "#14b8a6" }}>
+                <div style={{ ...miniTitle, marginBottom: 6 }}>Behavioral Baseline (7-day)</div>
+                <div style={{ color: "#cbd5e1", fontSize: 12, marginBottom: 8 }}>
+                  User: {incidentTimeline.behavioral_baseline.user_id || "-"} | Mean: {incidentTimeline.behavioral_baseline.mean ?? "-"} | StdDev: {incidentTimeline.behavioral_baseline.stddev ?? "-"}
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 120 }}>
+                  {incidentTimeline.behavioral_baseline.points.map((p, idx) => {
+                    const maxCount = Math.max(...incidentTimeline.behavioral_baseline.points.map((x) => x.count), 1);
+                    const h = Math.max(6, (p.count / maxCount) * 100);
+                    const z = incidentTimeline.behavioral_baseline.z_scores?.[idx] ?? 0;
+                    const color = z > 3 ? "#ef4444" : z > 2 ? "#f59e0b" : "#14b8a6";
+                    return (
+                      <div key={`${p.day}-${idx}`} title={`${p.day} | count=${p.count} | z=${z}`} style={{ flex: 1, minWidth: 24 }}>
+                        <div style={{ background: color, height: `${h}%`, borderRadius: "5px 5px 0 0" }} />
+                        <div style={{ color: "#64748b", fontSize: 10, marginTop: 4, textAlign: "center" }}>{p.day.slice(5)}</div>
+                        <div style={{ color, fontSize: 10, textAlign: "center" }}>z {z}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ marginTop: 8, color: "#94a3b8", fontSize: 11 }}>
+                  Sentinel trigger threshold: z-score &gt; 3.0
+                </div>
+              </div>
+            ) : null}
+
             <ul style={{ ...list, marginTop: 10 }}>
               {(incidentTimeline.timeline || []).map((t, idx) => (
                 <li key={`${t.timestamp}-${idx}`} style={{ ...row, flexDirection: "column", gap: 2, paddingBottom: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                    <span style={{ color: t.category === "soar" ? "#60a5fa" : t.category === "lifecycle" ? "#a78bfa" : "#94a3b8", fontSize: 12, fontWeight: 600 }}>
+                    <span style={{ color: t.category === "soar" ? "#60a5fa" : t.category === "lifecycle" ? "#a78bfa" : t.category === "threat_intel" ? "#f97316" : t.category === "sentinel" ? "#14b8a6" : "#94a3b8", fontSize: 12, fontWeight: 600 }}>
                       [{t.category?.toUpperCase() || "EVENT"}] {t.action}
                     </span>
                     <span style={{ color: "#64748b", fontSize: 11 }}>{t.timestamp?.slice(0, 16)}</span>
@@ -1639,6 +1677,20 @@ export default function CommandCenterPage() {
                       {t.playbook ? <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>{t.playbook}</span> : null}
                       {t.ghost_mode ? <span style={{ background: "#3b1f4e", color: "#c084fc", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>👻 Ghost</span> : null}
                       {t.jit_revoked ? <span style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>⛔ JIT Revoked</span> : null}
+                    </div>
+                  ) : null}
+                  {t.category === "threat_intel" ? (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11 }}>
+                      {t.ip ? <span style={{ color: "#fda4af" }}>IP: {t.ip}</span> : null}
+                      {t.threat_category ? <span style={{ color: "#fdba74" }}>{t.threat_category}</span> : null}
+                      {t.shared_intelligence ? <span style={{ background: "#4c1d95", color: "#ddd6fe", borderRadius: 10, padding: "1px 8px" }}>Shared Intelligence</span> : null}
+                    </div>
+                  ) : null}
+                  {t.category === "sentinel" ? (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11 }}>
+                      <span style={{ color: "#5eead4" }}>z-score: {t.z_score ?? "-"}</span>
+                      {t.event_type ? <span style={{ color: "#99f6e4" }}>event: {t.event_type}</span> : null}
+                      <span style={{ background: "#042f2e", color: "#5eead4", borderRadius: 10, padding: "1px 8px" }}>Auto Ghost-Mode</span>
                     </div>
                   ) : null}
                 </li>
