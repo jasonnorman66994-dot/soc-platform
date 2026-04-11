@@ -92,6 +92,11 @@ export default function CommandCenterPage() {
   const [storyError, setStoryError] = useState("");
   const [replayIndex, setReplayIndex] = useState(-1);
   const [isReplaying, setIsReplaying] = useState(false);
+  const [ghostModeEnabled, setGhostModeEnabled] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState("");
+  const [voiceResult, setVoiceResult] = useState(null);
+  const [jitStatus, setJitStatus] = useState(null);
 
   const authHeaders = useMemo(
     () => ({
@@ -302,6 +307,7 @@ export default function CommandCenterPage() {
           auto_response_enabled: !!soarPolicy.auto_response_enabled,
           default_risk_threshold: Number.parseInt(String(soarPolicy.default_risk_threshold || 0), 10),
           ml_risk_threshold: Number.parseFloat(String(soarPolicy.ml_risk_threshold ?? 5)),
+          ghost_mode: !!soarPolicy.ghost_mode,
           playbooks: Object.fromEntries(
             Object.entries(soarPolicy.playbooks || {}).map(([name, conf]) => [
               name,
@@ -309,6 +315,7 @@ export default function CommandCenterPage() {
                 enabled: !!conf?.enabled,
                 min_risk: Number.parseInt(String(conf?.min_risk || 0), 10),
                 ml_risk_threshold: Number.parseFloat(String(conf?.ml_risk_threshold ?? 5)),
+                deception_enabled: !!conf?.deception_enabled,
               },
             ])
           ),
@@ -396,6 +403,65 @@ export default function CommandCenterPage() {
       setSoarStatsLoading(false);
     }
   }
+
+  // ── Voice Command System ────────────────────────────────────────
+  function startVoiceListener() {
+    const SpeechRecognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+    if (!SpeechRecognition) {
+      setToast({ type: "error", message: "WebSpeech API not supported in this browser" });
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+    recognition.onresult = async (event) => {
+      const lastResult = event.results[event.results.length - 1];
+      if (!lastResult.isFinal) return;
+      const transcript = lastResult[0].transcript.trim();
+      setVoiceTranscript(transcript);
+      const normalized = transcript.toLowerCase().replace(/\s+/g, "_");
+      try {
+        const res = await fetch(`${API}/voice/command`, {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ command: normalized }),
+        });
+        const data = await res.json();
+        setVoiceResult(data);
+        if (data.status !== "unrecognized") {
+          setToast({ type: "success", message: `Voice: ${data.command} → ${data.status}` });
+          loadSoarPolicy();
+        }
+      } catch {
+        setToast({ type: "error", message: "Voice command failed" });
+      }
+    };
+    recognition.onerror = () => {
+      setVoiceActive(false);
+      setToast({ type: "error", message: "Voice recognition error" });
+    };
+    recognition.onend = () => setVoiceActive(false);
+    recognition.start();
+    setVoiceActive(true);
+  }
+
+  function stopVoiceListener() {
+    setVoiceActive(false);
+  }
+
+  // ── JIT Session Status ──────────────────────────────────────────
+  async function loadJitStatus() {
+    try {
+      const res = await fetch(`${API}/jit/status`, { headers: authHeaders });
+      if (res.ok) setJitStatus(await res.json());
+    } catch { /* ignore */ }
+  }
+
+  // ── Ghost-Mode sync from policy ─────────────────────────────────
+  useEffect(() => {
+    if (soarPolicy) setGhostModeEnabled(!!soarPolicy.ghost_mode);
+  }, [soarPolicy]);
 
 
   async function sendTestIngest() {
@@ -1059,10 +1125,41 @@ export default function CommandCenterPage() {
   return (
     <main style={{ minHeight: "100vh", padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <h1 style={{ margin: 0, color: "#60a5fa" }}>SOC Platform Command Center</h1>
-        <Link href="/" style={{ color: "#94a3b8", textDecoration: "none", border: "1px solid #334155", borderRadius: 8, padding: "8px 10px" }}>
-          Back to Product Site
-        </Link>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <h1 style={{ margin: 0, color: "#60a5fa" }}>SOC Platform Command Center</h1>
+          {voiceActive && (
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 20,
+              padding: "4px 12px", fontSize: 12, fontWeight: 600, color: "#60a5fa",
+              animation: "pulse 1.5s infinite",
+            }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#3b82f6", animation: "pulse 1.5s infinite" }} />
+              Voice Active
+            </span>
+          )}
+          {ghostModeEnabled && (
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              background: "#3b1f4e", border: "1px solid #a855f7", borderRadius: 20,
+              padding: "4px 12px", fontSize: 12, fontWeight: 600, color: "#c084fc",
+            }}>
+              👻 Ghost Mode
+            </span>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={voiceActive ? stopVoiceListener : startVoiceListener}
+            style={{ ...btn, background: voiceActive ? "#dc2626" : "#5b21b6", fontSize: 12 }}>
+            {voiceActive ? "Stop Voice" : "🎙 Voice"}
+          </button>
+          <Link href="/audit-dashboard" style={{ color: "#94a3b8", textDecoration: "none", border: "1px solid #334155", borderRadius: 8, padding: "8px 10px", fontSize: 13 }}>
+            Audit Dashboard
+          </Link>
+          <Link href="/" style={{ color: "#94a3b8", textDecoration: "none", border: "1px solid #334155", borderRadius: 8, padding: "8px 10px" }}>
+            Back to Product Site
+          </Link>
+        </div>
       </div>
 
       {toast ? (
@@ -1536,9 +1633,12 @@ export default function CommandCenterPage() {
                   </div>
                   <div style={{ color: "#cbd5e1", fontSize: 13 }}>{t.description}</div>
                   {t.category === "soar" ? (
-                    <div style={{ display: "flex", gap: 12, fontSize: 12 }}>
+                    <div style={{ display: "flex", gap: 12, fontSize: 12, flexWrap: "wrap", alignItems: "center" }}>
                       <span style={{ color: t.status === "success" ? "#22c55e" : "#ef4444" }}>{t.status}</span>
                       {t.risk_score != null ? <span style={{ color: "#94a3b8" }}>risk: {t.risk_score}</span> : null}
+                      {t.playbook ? <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>{t.playbook}</span> : null}
+                      {t.ghost_mode ? <span style={{ background: "#3b1f4e", color: "#c084fc", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>👻 Ghost</span> : null}
+                      {t.jit_revoked ? <span style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>⛔ JIT Revoked</span> : null}
                     </div>
                   ) : null}
                 </li>
@@ -1580,6 +1680,23 @@ export default function CommandCenterPage() {
               <button style={btnSecondary} onClick={loadSoarPolicy}>Reload Policy</button>
             </div>
 
+            <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#c084fc" }}>
+                <input
+                  type="checkbox"
+                  checked={!!soarPolicy.ghost_mode}
+                  onChange={(e) => updateSoarPolicy(["ghost_mode"], e.target.checked)}
+                />
+                👻 Ghost Mode (Global Deception)
+              </label>
+              <button style={{ ...btnSecondary, fontSize: 12 }} onClick={loadJitStatus}>Check JIT Status</button>
+              {jitStatus && (
+                <span style={{ color: jitStatus.count > 0 ? "#f87171" : "#6ee7b7", fontSize: 12 }}>
+                  {jitStatus.count} revoked session(s)
+                </span>
+              )}
+            </div>
+
             <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 12 }}>
               <label style={{ color: "#cbd5e1", fontSize: 13, whiteSpace: "nowrap" }}>Global ML Risk Threshold:</label>
               <input
@@ -1598,7 +1715,7 @@ export default function CommandCenterPage() {
               <h4 style={{ margin: 0, color: "#cbd5e1" }}>Per-Playbook Controls</h4>
               <ul style={{ ...list, marginTop: 8 }}>
                 {Object.entries(soarPolicy.playbooks || {}).map(([name, conf]) => (
-                  <li key={name} style={{ ...row, display: "grid", gridTemplateColumns: "1.3fr 0.8fr 0.8fr 1.4fr", gap: 8, alignItems: "center" }}>
+                  <li key={name} style={{ ...row, display: "grid", gridTemplateColumns: "1.3fr 0.6fr 0.6fr 0.5fr 1.4fr", gap: 8, alignItems: "center" }}>
                     <span style={{ textTransform: "capitalize" }}>{name.replaceAll("_", " ")}</span>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#cbd5e1" }}>
                       <input
@@ -1616,6 +1733,14 @@ export default function CommandCenterPage() {
                       value={conf?.min_risk ?? 85}
                       onChange={(e) => updateSoarPolicy(["playbooks", name, "min_risk"], Number.parseInt(e.target.value || "0", 10))}
                     />
+                    <label style={{ display: "flex", alignItems: "center", gap: 4, color: "#c084fc", fontSize: 12, whiteSpace: "nowrap" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!conf?.deception_enabled}
+                        onChange={(e) => updateSoarPolicy(["playbooks", name, "deception_enabled"], e.target.checked)}
+                      />
+                      Decoy
+                    </label>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <span style={{ color: "#94a3b8", fontSize: 11, whiteSpace: "nowrap" }}>ML Gate:</span>
                       <input
@@ -1781,6 +1906,21 @@ export default function CommandCenterPage() {
           ) : null}
         </div>
       ) : null}
+
+      {/* Voice Command Status */}
+      {(voiceActive || voiceTranscript) && (
+        <section style={{ ...card, marginTop: 16, border: "1px solid #5b21b6" }}>
+          <h3 style={h3}>🎙 Voice Command</h3>
+          {voiceTranscript && <p style={{ color: "#c084fc", fontSize: 13 }}>Last: &ldquo;{voiceTranscript}&rdquo;</p>}
+          {voiceResult && (
+            <div style={{ color: voiceResult.status === "unrecognized" ? "#f87171" : "#6ee7b7", fontSize: 13 }}>
+              {voiceResult.command} → {voiceResult.status} {voiceResult.detail ? `(${voiceResult.detail})` : ""}
+            </div>
+          )}
+        </section>
+      )}
+
+      <style>{`@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
     </main>
   );
 }
