@@ -308,6 +308,53 @@ Expected behavior:
 - Executive dashboard metrics update.
 - AI analysis suggests response actions.
 
+## Safe Lab Attack Scenarios
+
+Enumerate available synthetic scenarios:
+
+```bash
+curl http://localhost/api/demo/scenarios
+```
+
+Run a deterministic safe-lab scenario (supports dry run mode):
+
+```bash
+curl -X POST http://localhost/api/demo/simulate-attack \
+  -H "X-Tenant-ID: demo-corp" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id":"demo.user",
+    "source_country":"UK",
+    "destination_country":"US",
+    "scenario":"insider_data_exfiltration",
+    "iterations":2,
+    "include_noise":true,
+    "dry_run":false
+  }'
+```
+
+Available scenarios:
+
+- `credential_compromise_chain`
+- `impossible_travel_burst`
+- `insider_data_exfiltration`
+- `password_spray_wave`
+
+## Advanced Analytics (UEBA + ML)
+
+Tenant-scoped analytics APIs:
+
+- `GET /api/analytics/ueba?window_days=14`
+- `GET /api/analytics/ml-anomalies?window_days=14`
+- `GET /api/analytics/advanced?window_days=14`
+
+These endpoints provide:
+
+- UEBA user risk scoring and high-risk identity ranking
+- Lightweight anomaly detection using deterministic statistical scoring
+- Distribution snapshots across events, alerts, and incidents
+
 ## Default Demo Users
 
 - <owner@company.com> / owner1234 (owner)

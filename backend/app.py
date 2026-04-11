@@ -10,6 +10,7 @@ import secrets
 import io
 import csv
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 import psycopg
@@ -34,6 +35,7 @@ from auth.rbac import authorize
 from engine.detect import detect
 from engine.correlate import correlate
 from engine.ai import analyze_incident
+from engine.analytics import build_advanced_analytics, compute_ueba_summary, detect_ml_anomalies
 from soar.playbooks import execute_playbook_for_incident, get_execution_history
 from incidents.service import (
     add_timeline_event,
@@ -233,6 +235,15 @@ class DemoAttackBody(BaseModel):
     user_id: str = "demo.user"
     source_country: str = "UK"
     destination_country: str = "US"
+    scenario: Literal[
+        "credential_compromise_chain",
+        "impossible_travel_burst",
+        "insider_data_exfiltration",
+        "password_spray_wave",
+    ] = "credential_compromise_chain"
+    iterations: int = Field(default=1, ge=1, le=5)
+    include_noise: bool = False
+    dry_run: bool = False
 
 
 class WaitlistLeadBody(BaseModel):
@@ -273,6 +284,15 @@ class AdminDemoBody(BaseModel):
     source_country: str = "UK"
     destination_country: str = "US"
     user_id: str = "demo.user"
+    scenario: Literal[
+        "credential_compromise_chain",
+        "impossible_travel_burst",
+        "insider_data_exfiltration",
+        "password_spray_wave",
+    ] = "credential_compromise_chain"
+    iterations: int = Field(default=1, ge=1, le=5)
+    include_noise: bool = False
+    dry_run: bool = False
 
 
 class DemoResetBody(BaseModel):
@@ -1151,51 +1171,226 @@ def map_source_to_plan(source: str | None, default_plan: str) -> str:
     return default_plan
 
 
-def _build_attack_events(user_id: str, source_country: str, destination_country: str) -> list[dict]:
+def _scenario_catalog() -> list[dict]:
     return [
         {
-            "user_id": user_id,
-            "event_type": "email",
-            "subject": "URGENT: Security policy update",
-            "sender_domain": "comp-security-check.net",
-            "raw": {"stage": "email_delivered"},
+            "id": "credential_compromise_chain",
+            "name": "Credential Compromise Chain",
+            "description": "Phishing email click followed by login anomaly and exfiltration.",
+            "safety": "synthetic-only",
+            "expected_detections": ["SIGMA-001", "SIGMA-004", "SIGMA-002", "SIGMA-003"],
         },
         {
-            "user_id": user_id,
-            "event_type": "email_click",
-            "subject": "Clicked suspicious link",
-            "sender_domain": "comp-security-check.net",
-            "raw": {"stage": "link_clicked"},
+            "id": "impossible_travel_burst",
+            "name": "Impossible Travel Burst",
+            "description": "Multiple impossible-travel login anomalies in short succession.",
+            "safety": "synthetic-only",
+            "expected_detections": ["SIGMA-002"],
         },
         {
-            "user_id": user_id,
-            "event_type": "login_anomaly",
-            "ip": "198.51.100.9",
-            "raw": {"from": source_country, "to": destination_country, "geo_mismatch": True},
+            "id": "insider_data_exfiltration",
+            "name": "Insider Data Exfiltration",
+            "description": "Sensitive file access and outbound transfer pattern.",
+            "safety": "synthetic-only",
+            "expected_detections": ["SIGMA-005", "SIGMA-003"],
         },
         {
-            "user_id": user_id,
-            "event_type": "data_exfil",
-            "ip": "198.51.100.9",
-            "raw": {"stage": "file_download", "sensitive": True, "file": "finance_q3.xlsx"},
+            "id": "password_spray_wave",
+            "name": "Password Spray Wave",
+            "description": "Coordinated login anomalies across multiple identities.",
+            "safety": "synthetic-only",
+            "expected_detections": ["SIGMA-002"],
         },
     ]
 
 
-async def _run_demo_attack_flow(tenant_id: str, body: AdminDemoBody) -> dict:
-    outcomes = []
-    for evt in _build_attack_events(body.user_id, body.source_country, body.destination_country):
-        model = IngestEvent(**evt)
-        result = await ingest(model, tenant_id=tenant_id, _key={"tenant_id": tenant_id})
-        outcomes.append(result)
+def _build_scenario_events(body: AdminDemoBody, iteration: int) -> tuple[list[dict], list[str]]:
+    scenario = body.scenario
+    base_user = body.user_id
+    source_country = body.source_country
+    destination_country = body.destination_country
+    ip_suffix = 9 + iteration
+    timeline: list[str] = []
 
-    return {
-        "timeline": [
+    if scenario == "credential_compromise_chain":
+        events = [
+            {
+                "user_id": base_user,
+                "event_type": "email",
+                "subject": "URGENT: Security policy update",
+                "sender_domain": "comp-security-check.net",
+                "raw": {"stage": "email_delivered", "scenario": scenario, "iteration": iteration},
+            },
+            {
+                "user_id": base_user,
+                "event_type": "email_click",
+                "subject": "Clicked suspicious link",
+                "sender_domain": "comp-security-check.net",
+                "raw": {"stage": "link_clicked", "scenario": scenario, "iteration": iteration},
+            },
+            {
+                "user_id": base_user,
+                "event_type": "login_anomaly",
+                "ip": f"198.51.100.{ip_suffix}",
+                "raw": {
+                    "from": source_country,
+                    "to": destination_country,
+                    "geo_mismatch": True,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+            {
+                "user_id": base_user,
+                "event_type": "data_exfil",
+                "ip": f"198.51.100.{ip_suffix}",
+                "raw": {
+                    "stage": "file_download",
+                    "sensitive": True,
+                    "file": f"finance_q{(iteration % 4) + 1}.xlsx",
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+        ]
+        timeline = [
             "Email delivered",
             "Link clicked",
-            f"Login anomaly {body.source_country} -> {body.destination_country}",
+            f"Login anomaly {source_country} -> {destination_country}",
             "Sensitive file download",
-        ],
+        ]
+    elif scenario == "impossible_travel_burst":
+        events = [
+            {
+                "user_id": base_user,
+                "event_type": "login_anomaly",
+                "ip": f"203.0.113.{20 + iteration}",
+                "raw": {
+                    "from": source_country,
+                    "to": destination_country,
+                    "geo_mismatch": True,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+            {
+                "user_id": base_user,
+                "event_type": "login_anomaly",
+                "ip": f"203.0.113.{30 + iteration}",
+                "raw": {
+                    "from": destination_country,
+                    "to": "JP",
+                    "geo_mismatch": True,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+            {
+                "user_id": base_user,
+                "event_type": "login_anomaly",
+                "ip": f"203.0.113.{40 + iteration}",
+                "raw": {
+                    "from": "JP",
+                    "to": "US",
+                    "geo_mismatch": True,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+        ]
+        timeline = ["Impossible travel event #1", "Impossible travel event #2", "Impossible travel event #3"]
+    elif scenario == "insider_data_exfiltration":
+        events = [
+            {
+                "user_id": base_user,
+                "event_type": "file_download",
+                "raw": {
+                    "sensitive": True,
+                    "file": "payroll_master.csv",
+                    "stage": "bulk_access",
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+            {
+                "user_id": base_user,
+                "event_type": "data_exfil",
+                "ip": f"198.51.100.{60 + iteration}",
+                "raw": {
+                    "sensitive": True,
+                    "channel": "https_upload",
+                    "bytes": 25000000,
+                    "scenario": scenario,
+                    "iteration": iteration,
+                },
+            },
+        ]
+        timeline = ["Sensitive file accessed", "Large outbound exfiltration"]
+    else:
+        events = [
+            {
+                "user_id": f"spray.user{iteration}.1",
+                "event_type": "login_anomaly",
+                "ip": f"203.0.113.{80 + iteration}",
+                "raw": {"geo_mismatch": True, "source": "password_spray", "scenario": scenario, "iteration": iteration},
+            },
+            {
+                "user_id": f"spray.user{iteration}.2",
+                "event_type": "login_anomaly",
+                "ip": f"203.0.113.{80 + iteration}",
+                "raw": {"geo_mismatch": True, "source": "password_spray", "scenario": scenario, "iteration": iteration},
+            },
+            {
+                "user_id": f"spray.user{iteration}.3",
+                "event_type": "login_anomaly",
+                "ip": f"203.0.113.{80 + iteration}",
+                "raw": {"geo_mismatch": True, "source": "password_spray", "scenario": scenario, "iteration": iteration},
+            },
+        ]
+        timeline = ["Spray attempt user 1", "Spray attempt user 2", "Spray attempt user 3"]
+
+    if body.include_noise:
+        events.append(
+            {
+                "user_id": "normal.user",
+                "event_type": "email",
+                "subject": "Quarterly newsletter",
+                "sender_domain": "company.com",
+                "raw": {"benign": True, "scenario": "noise", "iteration": iteration},
+            }
+        )
+        timeline.append("Benign background activity")
+
+    return events, timeline
+
+
+async def _run_demo_attack_flow(tenant_id: str, body: AdminDemoBody) -> dict:
+    outcomes = []
+    timeline = []
+    emitted_events = 0
+
+    for idx in range(body.iterations):
+        events, local_timeline = _build_scenario_events(body, idx)
+        timeline.extend(local_timeline)
+        emitted_events += len(events)
+
+        if body.dry_run:
+            continue
+
+        for evt in events:
+            model = IngestEvent(**evt)
+            result = await ingest(model, tenant_id=tenant_id, _key={"tenant_id": tenant_id})
+            outcomes.append(result)
+
+    return {
+        "tenant_id": tenant_id,
+        "scenario": body.scenario,
+        "iterations": body.iterations,
+        "include_noise": body.include_noise,
+        "dry_run": body.dry_run,
+        "safe_lab": True,
+        "event_count": emitted_events,
+        "timeline": timeline,
         "outcomes": outcomes,
     }
 
@@ -2595,6 +2790,129 @@ def executive_dashboard(tenant_id: str = Depends(get_tenant), _user=Depends(requ
     }
 
 
+@app.get("/analytics/ueba")
+def analytics_ueba(
+    window_days: int = 14,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    safe_window = max(1, min(window_days, 60))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, raw, timestamp
+                FROM events
+                WHERE tenant_id=%s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY id DESC
+                LIMIT 5000
+                """,
+                (tenant_id, safe_window),
+            )
+            events = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, event_id, severity, rule_id, timestamp
+                FROM alerts
+                WHERE tenant_id=%s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY id DESC
+                LIMIT 5000
+                """,
+                (tenant_id, safe_window),
+            )
+            alerts = cur.fetchall()
+
+    summary = compute_ueba_summary(events=events, alerts=alerts, top_n=15)
+    return {
+        "tenant_id": tenant_id,
+        "window_days": safe_window,
+        "ueba": summary,
+    }
+
+
+@app.get("/analytics/ml-anomalies")
+def analytics_ml_anomalies(
+    window_days: int = 14,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    safe_window = max(1, min(window_days, 60))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, raw, timestamp
+                FROM events
+                WHERE tenant_id=%s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY id DESC
+                LIMIT 5000
+                """,
+                (tenant_id, safe_window),
+            )
+            events = cur.fetchall()
+
+    anomalies = detect_ml_anomalies(events=events)
+    return {
+        "tenant_id": tenant_id,
+        "window_days": safe_window,
+        "ml": anomalies,
+    }
+
+
+@app.get("/analytics/advanced")
+def analytics_advanced(
+    window_days: int = 14,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    safe_window = max(1, min(window_days, 60))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, raw, timestamp
+                FROM events
+                WHERE tenant_id=%s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY id DESC
+                LIMIT 5000
+                """,
+                (tenant_id, safe_window),
+            )
+            events = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, event_id, severity, rule_id, timestamp
+                FROM alerts
+                WHERE tenant_id=%s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY id DESC
+                LIMIT 5000
+                """,
+                (tenant_id, safe_window),
+            )
+            alerts = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, severity, status, entity, timestamp
+                FROM incidents
+                WHERE tenant_id=%s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY id DESC
+                LIMIT 2000
+                """,
+                (tenant_id, safe_window),
+            )
+            incidents = cur.fetchall()
+
+    advanced = build_advanced_analytics(events=events, alerts=alerts, incidents=incidents)
+    return {
+        "tenant_id": tenant_id,
+        "window_days": safe_window,
+        "advanced": advanced,
+    }
+
+
 @app.get("/demo/bootstrap")
 def demo_bootstrap():
     with get_conn() as conn:
@@ -2623,6 +2941,14 @@ async def admin_demo_showcase(body: AdminDemoBody, _admin=Depends(require_intern
     return await _run_demo_attack_flow("demo-corp", body)
 
 
+@app.get("/demo/scenarios")
+def demo_scenarios():
+    return {
+        "safe_lab": True,
+        "scenarios": _scenario_catalog(),
+    }
+
+
 @app.post("/demo/simulate-attack")
 async def simulate_attack(
     body: DemoAttackBody,
@@ -2633,6 +2959,10 @@ async def simulate_attack(
         user_id=body.user_id,
         source_country=body.source_country,
         destination_country=body.destination_country,
+        scenario=body.scenario,
+        iterations=body.iterations,
+        include_noise=body.include_noise,
+        dry_run=body.dry_run,
     )
     return await _run_demo_attack_flow(tenant_id, demo_body)
 
