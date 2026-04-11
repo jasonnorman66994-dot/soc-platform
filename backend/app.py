@@ -2529,6 +2529,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
         ]
     ).get(event.user_id)
 
+    ml_risk_boost = 0
     if context:
         patterns = _detect_behavior_patterns(context)
         user_alerts = [
@@ -2536,6 +2537,17 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
             for item in alert_rows
         ]
         risk_score = _calculate_context_risk(context, user_alerts, patterns)
+        # ML anomaly boost: if this user is a statistical outlier in recent traffic, raise risk score
+        _ml_boost_result = detect_ml_anomalies(events=[
+            {"id": item.get("id"), "user_id": item.get("user_id"),
+             "timestamp": item.get("timestamp"), "type": item.get("event_type"), "raw": {}}
+            for item in recent_events
+        ])
+        for _anom in _ml_boost_result.get("anomalies", []):
+            if _anom.get("kind") == "user_activity_outlier" and _anom.get("user_id") == event.user_id:
+                ml_risk_boost = int(min(15, round(_anom["z_score"] * 3.0)))
+                break
+        risk_score = min(100, risk_score + ml_risk_boost)
         active_soar_policy = _get_cached_soar_policy(tenant_id)
         selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
 
@@ -2633,6 +2645,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                 "user": event.user_id,
                 "risk_score": risk_score,
                 "patterns": patterns,
+                "ml_risk_boost": ml_risk_boost,
             },
         )
 
@@ -2642,6 +2655,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
         "event": {"id": saved_event["id"], "timestamp": saved_event["timestamp"].isoformat(), **payload},
         "alerts": alert_rows,
         "incident": incident_row,
+        "ml_risk_boost": ml_risk_boost,
     }
 
 
@@ -3101,6 +3115,77 @@ def update_soar_policies(
     return {"tenant_id": tenant_id, "policy": saved}
 
 
+@app.get("/soar/audit")
+def get_soar_audit(
+    window_days: int = 30,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Return SOAR execution audit statistics for this tenant."""
+    from collections import Counter as _Counter
+    safe_window = max(1, min(window_days, 90))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action, meta, timestamp
+                FROM audit_logs
+                WHERE tenant_id=%s
+                  AND action LIKE 'soar.%%'
+                  AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY timestamp DESC
+                LIMIT 500
+                """,
+                (tenant_id, safe_window),
+            )
+            rows = cur.fetchall()
+
+    total = len(rows)
+    successes = sum(1 for r in rows if (r.get("meta") or {}).get("status") == "success")
+    failures = sum(1 for r in rows if (r.get("meta") or {}).get("status") not in ("success", None, "unknown"))
+
+    by_playbook: dict[str, dict] = {}
+    daily: _Counter = _Counter()
+    for r in rows:
+        meta = r.get("meta") or {}
+        playbook = meta.get("playbook") or "unknown"
+        status = meta.get("status") or "unknown"
+        if playbook not in by_playbook:
+            by_playbook[playbook] = {"total": 0, "success": 0, "failed": 0}
+        by_playbook[playbook]["total"] += 1
+        if status == "success":
+            by_playbook[playbook]["success"] += 1
+        elif status not in ("unknown", None):
+            by_playbook[playbook]["failed"] += 1
+        ts = r.get("timestamp")
+        if ts:
+            day = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+            daily[day] += 1
+
+    recent = [
+        {
+            "action": r.get("action"),
+            "playbook": (r.get("meta") or {}).get("playbook"),
+            "status": (r.get("meta") or {}).get("status"),
+            "risk_score": (r.get("meta") or {}).get("risk_score"),
+            "timestamp": r["timestamp"].isoformat() if hasattr(r.get("timestamp"), "isoformat") else str(r.get("timestamp")),
+        }
+        for r in rows[:20]
+    ]
+
+    return {
+        "tenant_id": tenant_id,
+        "window_days": safe_window,
+        "total_executions": total,
+        "successful_executions": successes,
+        "failed_executions": failures,
+        "success_rate": round(successes / total * 100, 1) if total else 0.0,
+        "by_playbook": by_playbook,
+        "daily_trend": [{"day": d, "count": c} for d, c in sorted(daily.items())],
+        "recent_actions": recent,
+    }
+
+
 @app.put("/incidents/{incident_id}/status")
 def update_incident_status_endpoint(
     incident_id: int,
@@ -3178,11 +3263,11 @@ def get_incident_timeline(
     tenant_id: str = Depends(get_tenant),
     _user=Depends(require_action("view_incidents")),
 ):
-    """Get incident timeline events."""
+    """Get incident timeline enriched with SOAR actions and audit log entries."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, status, severity, title, first_seen, last_seen FROM incidents WHERE id=%s AND tenant_id=%s",
+                "SELECT id, entity, status, severity, story, assigned_to, responded_at, first_seen, last_seen FROM incidents WHERE id=%s AND tenant_id=%s",
                 (incident_id, tenant_id),
             )
             incident = cur.fetchone()
@@ -3190,21 +3275,90 @@ def get_incident_timeline(
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action, user_id, meta, timestamp
+                FROM audit_logs
+                WHERE tenant_id=%s
+                  AND resource=%s
+                ORDER BY timestamp ASC
+                LIMIT 300
+                """,
+                (tenant_id, f"incidents/{incident_id}"),
+            )
+            audit_rows = cur.fetchall()
+
+    timeline = []
+
+    if incident.get("first_seen"):
+        timeline.append({
+            "timestamp": incident["first_seen"].isoformat(),
+            "action": "incident_created",
+            "category": "lifecycle",
+            "description": f"Incident detected for entity: {incident.get('entity') or 'unknown'}",
+            "severity": incident.get("severity"),
+            "actor": "system",
+        })
+
+    for r in audit_rows:
+        action = r.get("action") or ""
+        meta = r.get("meta") or {}
+        ts = r.get("timestamp")
+        ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        if action.startswith("soar."):
+            playbook = meta.get("playbook") or "unknown"
+            status = meta.get("status") or "unknown"
+            risk = meta.get("risk_score")
+            desc = f"SOAR playbook executed: {playbook} — {status}"
+            if risk is not None:
+                desc += f" (risk: {risk})"
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "soar",
+                "description": desc,
+                "playbook": playbook,
+                "status": status,
+                "risk_score": risk,
+                "actor": r.get("user_id") or "system",
+            })
+        else:
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "analyst" if r.get("user_id") else "system",
+                "description": meta.get("description") or action.replace(".", " ").title(),
+                "actor": r.get("user_id") or "system",
+            })
+
+    if incident.get("responded_at"):
+        timeline.append({
+            "timestamp": incident["responded_at"].isoformat(),
+            "action": "incident_responded",
+            "category": "lifecycle",
+            "description": "Incident marked as responded",
+            "actor": "system",
+        })
+    elif incident.get("last_seen"):
+        timeline.append({
+            "timestamp": incident["last_seen"].isoformat(),
+            "action": "incident_updated",
+            "category": "lifecycle",
+            "description": "Last activity recorded",
+            "actor": "system",
+        })
+
+    timeline.sort(key=lambda x: x.get("timestamp") or "")
+
     return {
         "incident_id": incident_id,
-        "status": incident["status"],
-        "timeline": [
-            {
-                "timestamp": incident["first_seen"].isoformat(),
-                "action": "incident_created",
-                "description": "Incident detected",
-            },
-            {
-                "timestamp": incident["last_seen"].isoformat(),
-                "action": "incident_updated",
-                "description": "Last activity",
-            },
-        ],
+        "entity": incident.get("entity"),
+        "status": incident.get("status"),
+        "severity": incident.get("severity"),
+        "timeline": timeline,
+        "event_count": len(timeline),
     }
 
 

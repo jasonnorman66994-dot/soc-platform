@@ -76,6 +76,12 @@ export default function CommandCenterPage() {
   const [soarIncidentId, setSoarIncidentId] = useState("");
   const [soarPolicy, setSoarPolicy] = useState(null);
   const [soarPolicySaving, setSoarPolicySaving] = useState(false);
+  const [soarAudit, setSoarAudit] = useState(null);
+  const [soarAuditWindowDays, setSoarAuditWindowDays] = useState("30");
+  const [soarAuditLoading, setSoarAuditLoading] = useState(false);
+  const [incidentTimeline, setIncidentTimeline] = useState(null);
+  const [incidentTimelineLoading, setIncidentTimelineLoading] = useState(false);
+  const [incidentTimelineId, setIncidentTimelineId] = useState("");
   const [liveSimulationStatus, setLiveSimulationStatus] = useState(null);
   const [liveSimulationForm, setLiveSimulationForm] = useState({ interval_seconds: 25, include_noise: true, rounds: 2 });
   const [executiveStory, setExecutiveStory] = useState(null);
@@ -220,6 +226,7 @@ export default function CommandCenterPage() {
         await fetchIncidents();
         await fetchAlerts();
         await loadSoarHistory(incidentId);
+        await loadIncidentTimeline(incidentId);
       } catch {
         setToast({ type: "warning", message: "SOAR playbook executed, but the dashboard refresh failed" });
       }
@@ -324,6 +331,49 @@ export default function CommandCenterPage() {
     const data = await res.json();
     setExecStats(data?.tenant_id ? data : null);
   }
+  
+  async function loadSoarAudit() {
+    if (soarAuditLoading) return;
+    setSoarAuditLoading(true);
+    try {
+      const safe = Math.max(1, Math.min(Number.parseInt(soarAuditWindowDays || "30", 10) || 30, 90));
+      const res = await fetch(`${API}/soar/audit?window_days=${safe}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to load SOAR audit" });
+        return;
+      }
+      setSoarAuditWindowDays(String(safe));
+      setSoarAudit(data);
+      setToast({ type: "success", message: `SOAR audit loaded: ${data.total_executions} total executions` });
+    } catch {
+      setToast({ type: "error", message: "Failed to load SOAR audit" });
+    } finally {
+      setSoarAuditLoading(false);
+    }
+  }
+
+  async function loadIncidentTimeline(idOverride) {
+    const id = Number.parseInt(String(idOverride || incidentTimelineId || soarIncidentId), 10);
+    if (!id) { setToast({ type: "error", message: "Select an incident ID to load timeline" }); return; }
+    setIncidentTimelineLoading(true);
+    setIncidentTimelineId(String(id));
+    try {
+      const res = await fetch(`${API}/incidents/${id}/timeline`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to load incident timeline" });
+        return;
+      }
+      setIncidentTimeline(data);
+      setToast({ type: "success", message: `Timeline loaded: ${data.event_count} events for incident #${id}` });
+    } catch {
+      setToast({ type: "error", message: "Failed to load incident timeline" });
+    } finally {
+      setIncidentTimelineLoading(false);
+    }
+  }
+
 
   async function sendTestIngest() {
     const payload = {
@@ -1318,6 +1368,114 @@ export default function CommandCenterPage() {
       </section>
 
       <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>SOAR Audit Dashboard</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 8 }}>
+          <input
+            style={input}
+            type="number"
+            min="1"
+            max="90"
+            value={soarAuditWindowDays}
+            onChange={(e) => setSoarAuditWindowDays(e.target.value)}
+            placeholder="Window days (1-90)"
+          />
+          <button style={btn} onClick={loadSoarAudit} disabled={soarAuditLoading}>
+            {soarAuditLoading ? "Loading..." : "Load SOAR Audit"}
+          </button>
+        </div>
+        {soarAudit ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(148px,1fr))", gap: 10, marginTop: 10 }}>
+              <div style={miniCard}><div style={miniTitle}>Total Executions</div><div>{soarAudit.total_executions}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Succeeded</div><div style={{ color: "#22c55e" }}>{soarAudit.successful_executions}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Failed</div><div style={{ color: soarAudit.failed_executions > 0 ? "#ef4444" : "#22c55e" }}>{soarAudit.failed_executions}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Success Rate</div><div>{soarAudit.success_rate}%</div></div>
+            </div>
+            {Object.keys(soarAudit.by_playbook || {}).length > 0 ? (
+              <div style={{ marginTop: 10 }}>
+                <h4 style={{ margin: 0, marginBottom: 6, color: "#cbd5e1" }}>By Playbook</h4>
+                <ul style={list}>
+                  {Object.entries(soarAudit.by_playbook).map(([name, stats]) => (
+                    <li key={name} style={{ ...row, display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 8 }}>
+                      <span style={{ textTransform: "capitalize" }}>{name.replaceAll("_", " ")}</span>
+                      <span style={{ color: "#94a3b8" }}>{stats.total} runs</span>
+                      <span style={{ color: "#22c55e" }}>{stats.success} ok</span>
+                      <span style={{ color: stats.failed > 0 ? "#ef4444" : "#94a3b8" }}>{stats.failed} err</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {soarAudit.recent_actions?.length > 0 ? (
+              <div style={{ marginTop: 10 }}>
+                <h4 style={{ margin: 0, marginBottom: 6, color: "#cbd5e1" }}>Recent Actions</h4>
+                <ul style={list}>
+                  {soarAudit.recent_actions.slice(0, 8).map((a, idx) => (
+                    <li key={`${a.timestamp}-${idx}`} style={row}>
+                      <span>{a.timestamp?.slice(0, 16)} — {a.playbook || a.action}</span>
+                      <span style={{ color: a.status === "success" ? "#22c55e" : a.status ? "#ef4444" : "#94a3b8" }}>{a.status || "-"}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p style={{ color: "#94a3b8", marginBottom: 0, marginTop: 8 }}>Load SOAR audit to see execution statistics.</p>
+        )}
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>Incident SOAR Timeline</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 8 }}>
+          <input
+            style={input}
+            type="number"
+            min="1"
+            placeholder="Incident ID"
+            value={incidentTimelineId || soarIncidentId}
+            onChange={(e) => setIncidentTimelineId(e.target.value)}
+          />
+          <button style={btn} onClick={() => loadIncidentTimeline()} disabled={incidentTimelineLoading}>
+            {incidentTimelineLoading ? "Loading..." : "Load Incident Timeline"}
+          </button>
+        </div>
+        {incidentTimeline ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(148px,1fr))", gap: 10, marginTop: 10 }}>
+              <div style={miniCard}><div style={miniTitle}>Incident</div><div>#{incidentTimeline.incident_id}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Entity</div><div>{incidentTimeline.entity || "-"}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Status</div><div>{incidentTimeline.status || "-"}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Timeline Events</div><div>{incidentTimeline.event_count}</div></div>
+            </div>
+            <ul style={{ ...list, marginTop: 10 }}>
+              {(incidentTimeline.timeline || []).map((t, idx) => (
+                <li key={`${t.timestamp}-${idx}`} style={{ ...row, flexDirection: "column", gap: 2, paddingBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+                    <span style={{ color: t.category === "soar" ? "#60a5fa" : t.category === "lifecycle" ? "#a78bfa" : "#94a3b8", fontSize: 12, fontWeight: 600 }}>
+                      [{t.category?.toUpperCase() || "EVENT"}] {t.action}
+                    </span>
+                    <span style={{ color: "#64748b", fontSize: 11 }}>{t.timestamp?.slice(0, 16)}</span>
+                  </div>
+                  <div style={{ color: "#cbd5e1", fontSize: 13 }}>{t.description}</div>
+                  {t.category === "soar" ? (
+                    <div style={{ display: "flex", gap: 12, fontSize: 12 }}>
+                      <span style={{ color: t.status === "success" ? "#22c55e" : "#ef4444" }}>{t.status}</span>
+                      {t.risk_score != null ? <span style={{ color: "#94a3b8" }}>risk: {t.risk_score}</span> : null}
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p style={{ color: "#94a3b8", marginBottom: 0, marginTop: 8 }}>
+            Select an incident and load its SOAR-enriched timeline.
+          </p>
+        )}
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
         <h3 style={h3}>SOAR Playbook Policy</h3>
         {soarPolicy ? (
           <>
@@ -1491,6 +1649,15 @@ export default function CommandCenterPage() {
           {JSON.stringify(ingestResult, null, 2)}
         </pre>
       )}
+
+      {ingestResult?.ml_risk_boost > 0 ? (
+        <div style={{ ...card, marginTop: 8, border: "1px solid #7c3aed", display: "flex", gap: 10, alignItems: "center" }}>
+          <span style={{ color: "#a78bfa", fontSize: 13, fontWeight: 600 }}>ML Anomaly Boost</span>
+          <span style={{ color: "#c4b5fd" }}>
+            Risk score raised by +{ingestResult.ml_risk_boost} points because this user is a statistical outlier in recent event volume.
+          </span>
+        </div>
+      ) : null}
     </main>
   );
 }
