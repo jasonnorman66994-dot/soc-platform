@@ -88,7 +88,12 @@ export default function AuditDashboard() {
   const email_pulse = useMemo(() => {
     const tlds = emailDrive?.flagged_tlds || [];
     if (!tlds.length) return null;
-    const top = tlds[0];
+    const sorted_tlds = [...tlds].sort((a, b) => {
+      const z_diff = (b?.z_score || 0) - (a?.z_score || 0);
+      if (z_diff !== 0) return z_diff;
+      return (b?.current_hour_msgs || 0) - (a?.current_hour_msgs || 0);
+    });
+    const top = sorted_tlds[0];
     const width = 320;
     const height = 72;
     const padding = 8;
