@@ -218,6 +218,11 @@ None.
 
 ### Added
 
+- Added safe-lab attack scenario catalog endpoint (`GET /api/demo/scenarios`) with four deterministic scenarios: credential compromise chain, impossible travel burst, insider data exfiltration, and password spray wave.
+- Enhanced `POST /api/demo/simulate-attack` with scenario controls (`scenario`, `iterations`, `include_noise`, `dry_run`) to run bounded synthetic simulations without production side effects.
+- Added UEBA analytics endpoint (`GET /api/analytics/ueba`) for user behavior risk scoring using event diversity, alert severity weighting, IP churn, and geo mismatch signals.
+- Added lightweight ML anomaly endpoint (`GET /api/analytics/ml-anomalies`) using deterministic statistical outlier detection on event volume and per-user activity spikes.
+- Added combined analytics snapshot endpoint (`GET /api/analytics/advanced`) to aggregate UEBA, anomaly findings, and event/alert/incident distributions.
 - Board report schedules now validate cadence fields and compute `next_run` for daily, weekly, and monthly exports.
 - Monthly board report schedules now support `day_of_month` in the admin API and Command Center.
 - Board report schedules can now be executed manually through `POST /api/admin/reports/schedules/{id}/run` and the Command Center `Run Now` control.
