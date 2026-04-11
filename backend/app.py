@@ -307,7 +307,7 @@ except (ValueError, TypeError):
 
 
 def _select_playbook_title(patterns: list[str], event_type: str | None, policy: dict | None = None) -> str:
-    active_policy = _normalize_soar_policy(policy)
+    active_policy = policy if isinstance(policy, dict) else _normalize_soar_policy(policy)
     pattern_overrides = active_policy.get("pattern_overrides") or {}
     for pattern in patterns:
         candidate = pattern_overrides.get(pattern)
@@ -336,7 +336,7 @@ def _should_auto_respond(
     playbook_title: str,
     policy: dict | None = None,
 ) -> bool:
-    active_policy = _normalize_soar_policy(policy)
+    active_policy = policy if isinstance(policy, dict) else _normalize_soar_policy(policy)
     if not AUTO_RESPONSE_ENABLED or not incident_row:
         return False
     if not active_policy.get("auto_response_enabled", True):
@@ -621,6 +621,8 @@ RATE_LIMITS: dict[str, list[datetime]] = {}
 RULES_DIR = Path(__file__).parent / "rules"
 LIVE_SIMULATION_TASKS: dict[str, asyncio.Task] = {}
 LIVE_SIMULATION_STATE: dict[str, dict[str, Any]] = {}
+SOAR_POLICY_CACHE: dict[str, dict[str, Any]] = {}
+SOAR_POLICY_CACHE_TTL_SECONDS = 30
 
 ROLE_ORDER = {"viewer": 1, "analyst": 2, "admin": 3, "owner": 4}
 VALID_PLANS = {"free", "pro", "enterprise"}
@@ -854,9 +856,17 @@ def _default_soar_policy() -> dict:
     }
 
 
-def _normalize_soar_policy(raw_policy: dict | None) -> dict:
+def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
     default = _default_soar_policy()
-    candidate = raw_policy if isinstance(raw_policy, dict) else {}
+    candidate = {}
+    if isinstance(raw_policy, dict):
+        candidate = raw_policy
+    elif isinstance(raw_policy, str):
+        try:
+            parsed_policy = json.loads(raw_policy)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_policy = {}
+        candidate = parsed_policy if isinstance(parsed_policy, dict) else {}
 
     auto_response_enabled = candidate.get("auto_response_enabled")
     if not isinstance(auto_response_enabled, bool):
@@ -905,7 +915,7 @@ def _get_or_create_soar_policy(tenant_id: str) -> dict:
         with conn.cursor() as cur:
             cur.execute("SELECT config FROM soar_policies WHERE tenant_id=%s", (tenant_id,))
             row = cur.fetchone()
-            if row and row.get("config"):
+            if row is not None and row.get("config") is not None:
                 return _normalize_soar_policy(row.get("config"))
 
             cur.execute(
@@ -936,7 +946,23 @@ def _save_soar_policy(tenant_id: str, policy: dict) -> dict:
             )
             row = cur.fetchone()
         conn.commit()
-    return _normalize_soar_policy((row or {}).get("config"))
+    saved = _normalize_soar_policy((row or {}).get("config"))
+    SOAR_POLICY_CACHE[tenant_id] = {"policy": saved, "cached_at": now_utc()}
+    return saved
+
+
+def _get_cached_soar_policy(tenant_id: str) -> dict:
+    cached = SOAR_POLICY_CACHE.get(tenant_id)
+    if cached:
+        cached_at = cached.get("cached_at")
+        if isinstance(cached_at, datetime):
+            age_seconds = (now_utc() - cached_at).total_seconds()
+            if age_seconds <= SOAR_POLICY_CACHE_TTL_SECONDS and isinstance(cached.get("policy"), dict):
+                return cached["policy"]
+
+    policy = _get_or_create_soar_policy(tenant_id)
+    SOAR_POLICY_CACHE[tenant_id] = {"policy": policy, "cached_at": now_utc()}
+    return policy
 
 
 def compute_next_report_run(
@@ -2510,7 +2536,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
             for item in alert_rows
         ]
         risk_score = _calculate_context_risk(context, user_alerts, patterns)
-        active_soar_policy = _get_or_create_soar_policy(tenant_id)
+        active_soar_policy = _get_cached_soar_policy(tenant_id)
         selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
 
         if _should_auto_respond(incident_row, risk_score, patterns, selected_playbook, active_soar_policy):
@@ -2927,7 +2953,7 @@ def automate_incident_response(
         if "impossible_travel" in story or "impossible travel" in story:
             patterns.append("IMPOSSIBLE_TRAVEL_CHAIN")
 
-    active_soar_policy = _get_or_create_soar_policy(tenant_id)
+    active_soar_policy = _get_cached_soar_policy(tenant_id)
     selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
     incident_payload, event_payload = _build_playbook_inputs(
         incident_row,
@@ -3056,13 +3082,15 @@ def update_soar_policies(
             if patch.min_risk is not None:
                 target["min_risk"] = patch.min_risk
 
-    if body.event_type_overrides:
+    if body.event_type_overrides is not None:
+        merged["event_type_overrides"].clear()
         for event_type, playbook in body.event_type_overrides.items():
             if playbook not in VALID_PLAYBOOK_TYPES:
                 raise HTTPException(status_code=400, detail=f"Invalid event_type override target: {playbook}")
             merged["event_type_overrides"][event_type] = playbook
 
-    if body.pattern_overrides:
+    if body.pattern_overrides is not None:
+        merged["pattern_overrides"].clear()
         for pattern, playbook in body.pattern_overrides.items():
             if playbook not in VALID_PLAYBOOK_TYPES:
                 raise HTTPException(status_code=400, detail=f"Invalid pattern override target: {playbook}")

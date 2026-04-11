@@ -110,6 +110,7 @@ export default function CommandCenterPage() {
   }, [useDemoMode]);
 
   useEffect(() => {
+    setSoarPolicy(null);
     if (!accessToken || !tenantId) return;
     fetchAlerts();
     fetchIncidents();
@@ -241,13 +242,19 @@ export default function CommandCenterPage() {
   }
 
   async function loadSoarPolicy() {
+    setSoarPolicy(null);
     try {
       const res = await fetch(`${API}/soar/policies`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) return;
+      if (!res.ok) {
+        setSoarPolicy(null);
+        setToast({ type: "error", message: data?.detail || "Failed to load SOAR policy" });
+        return;
+      }
       setSoarPolicy(data?.policy || null);
     } catch {
-      // ignore
+      setSoarPolicy(null);
+      setToast({ type: "error", message: "Failed to load SOAR policy" });
     }
   }
 
