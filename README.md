@@ -225,6 +225,7 @@ Admin-only endpoints for managing automated board report export schedules:
 - **Get schedule**: `GET /api/admin/reports/schedules/{id}` — Returns single schedule by ID.
 - **Update schedule**: `PATCH /api/admin/reports/schedules/{id}` — Partial update of schedule fields.
 - **Run schedule now**: `POST /api/admin/reports/schedules/{id}/run` — Executes the configured export immediately, updates `last_run`/`next_run`, and returns the generated report payload.
+- **List due schedules**: `GET /api/admin/reports/schedules/due` — Returns enabled schedules whose `next_run` is currently in the past (overdue).
 - **Delete schedule**: `DELETE /api/admin/reports/schedules/{id}` — Removes schedule.
 
 Schedule validation rules:
@@ -234,6 +235,8 @@ Schedule validation rules:
 - Weekly schedules require `day_of_week` in the range `0-6`
 - Monthly schedules require `day_of_month` in the range `1-28`
 - Enabled schedules now return a computed `next_run` timestamp
+
+Background execution: the backend starts an APScheduler job on startup that fires every 60 seconds, automatically executing all enabled schedules whose `next_run <= NOW()` and advancing their timestamps.
 
 Command Center support:
 

@@ -24,6 +24,11 @@ try:
 except Exception:
     stripe = None
 
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+except Exception:  # pragma: no cover
+    BackgroundScheduler = None  # type: ignore[assignment,misc]
+
 from auth.jwt import create_access_token, create_refresh_token, verify_token
 from auth.rbac import authorize
 from engine.detect import detect
@@ -911,11 +916,55 @@ async def security_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_scheduler: "BackgroundScheduler | None" = None
+
+
+def _fire_due_schedules() -> None:
+    """Query enabled schedules whose next_run is past and execute each one."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM report_schedules
+                    WHERE enabled = TRUE
+                      AND next_run IS NOT NULL
+                      AND next_run <= NOW()
+                    ORDER BY next_run ASC
+                    """
+                )
+                due_ids = [row["id"] for row in cur.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[scheduler] error querying due schedules: {exc}", flush=True)
+        return
+
+    for schedule_id in due_ids:
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    run_report_schedule_export(cur, schedule_id)
+                    conn.commit()
+            print(f"[scheduler] executed schedule {schedule_id}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[scheduler] error running schedule {schedule_id}: {exc}", flush=True)
+
+
 @app.on_event("startup")
 def startup_event():
+    global _scheduler
     init_db()
     cleanup_webhook_replays()
     enforce_security_policy()
+    if BackgroundScheduler is not None:
+        _scheduler = BackgroundScheduler(job_defaults={"misfire_grace_time": 30})
+        _scheduler.add_job(_fire_due_schedules, "interval", minutes=1, id="fire_due_schedules")
+        _scheduler.start()
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    if _scheduler is not None and _scheduler.running:
+        _scheduler.shutdown(wait=False)
 
 
 @app.get("/health")
@@ -1927,6 +1976,24 @@ def update_report_schedule(
             row = cur.fetchone()
             conn.commit()
             return ReportScheduleResponse(**row)
+
+
+@app.get("/admin/reports/schedules/due")
+def list_due_report_schedules(_admin=Depends(require_internal_admin_token)):
+    """List enabled schedules whose next_run is in the past (i.e. currently overdue)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, frequency, next_run
+                FROM report_schedules
+                WHERE enabled = TRUE
+                  AND next_run IS NOT NULL
+                  AND next_run <= NOW()
+                ORDER BY next_run ASC
+                """
+            )
+            return cur.fetchall()
 
 
 @app.delete("/admin/reports/schedules/{schedule_id}")
