@@ -220,18 +220,26 @@ Board report query parameters:
 
 Admin-only endpoints for managing automated board report export schedules:
 
-- **Create schedule**: `POST /api/admin/reports/schedules` — Accepts `name`, `description`, `format` (markdown/json), `frequency` (daily/weekly/monthly), `day_of_week`, `hour_of_day`, `window_days`, `incident_limit`, `recipients`, `enabled`.
+- **Create schedule**: `POST /api/admin/reports/schedules` — Accepts `name`, `description`, `format` (markdown/json), `frequency` (daily/weekly/monthly), `day_of_week`, `day_of_month`, `hour_of_day`, `window_days`, `incident_limit`, `recipients`, `enabled`.
 - **List schedules**: `GET /api/admin/reports/schedules` — Returns array of all configured export schedules.
 - **Get schedule**: `GET /api/admin/reports/schedules/{id}` — Returns single schedule by ID.
 - **Update schedule**: `PATCH /api/admin/reports/schedules/{id}` — Partial update of schedule fields.
 - **Delete schedule**: `DELETE /api/admin/reports/schedules/{id}` — Removes schedule.
 
+Schedule validation rules:
+
+- `format` must be `markdown` or `json`
+- `frequency` must be `daily`, `weekly`, or `monthly`
+- Weekly schedules require `day_of_week` in the range `0-6`
+- Monthly schedules require `day_of_month` in the range `1-28`
+- Enabled schedules now return a computed `next_run` timestamp
+
 Command Center support:
 
 - **Admin Operations Panel** now includes Board Report Export Schedule section.
-- Input fields for schedule name, frequency, day-of-week, hour, report format, and immediate CRUD controls.
+- Input fields for schedule name, frequency, day-of-week or day-of-month, hour, report format, and immediate CRUD controls.
 - `Load Board Report` and `Download Board Report` use parameter inputs and clamp to safe ranges.
-- Active schedules listed with delete buttons for one-click management.
+- Active schedules listed with delete buttons and computed next-run visibility.
 
 ## Founder Assets
 

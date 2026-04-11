@@ -37,6 +37,7 @@ export default function CommandCenterPage() {
     format: "markdown",
     frequency: "weekly",
     day_of_week: 1,
+    day_of_month: 1,
     hour_of_day: 9,
     window_days: 30,
     incident_limit: 10,
@@ -357,6 +358,7 @@ export default function CommandCenterPage() {
       format: "markdown",
       frequency: "weekly",
       day_of_week: 1,
+      day_of_month: 1,
       hour_of_day: 9,
       window_days: 30,
       incident_limit: 10,
@@ -513,7 +515,12 @@ export default function CommandCenterPage() {
               <option value="weekly">Weekly</option>
               <option value="monthly">Monthly</option>
             </select>
-            <input style={input} type="number" min="0" max="6" placeholder="Day (0=Mon, 6=Sun)" value={scheduleForm.day_of_week} onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_week: Number.parseInt(e.target.value) })} />
+            {scheduleForm.frequency === "weekly" ? (
+              <input style={input} type="number" min="0" max="6" placeholder="Day (0=Mon, 6=Sun)" value={scheduleForm.day_of_week ?? ""} onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_week: e.target.value === "" ? null : Number.parseInt(e.target.value, 10), day_of_month: null })} />
+            ) : null}
+            {scheduleForm.frequency === "monthly" ? (
+              <input style={input} type="number" min="1" max="28" placeholder="Day of month (1-28)" value={scheduleForm.day_of_month ?? ""} onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_month: e.target.value === "" ? null : Number.parseInt(e.target.value, 10), day_of_week: null })} />
+            ) : null}
             <input style={input} type="number" min="0" max="23" placeholder="Hour (0-23)" value={scheduleForm.hour_of_day} onChange={(e) => setScheduleForm({ ...scheduleForm, hour_of_day: Number.parseInt(e.target.value) })} />
             <select style={input} value={scheduleForm.format} onChange={(e) => setScheduleForm({ ...scheduleForm, format: e.target.value })}>
               <option value="markdown">Markdown</option>
@@ -528,7 +535,7 @@ export default function CommandCenterPage() {
               <ul style={list}>
                 {reportSchedules.map((s) => (
                   <li key={s.id} style={{ ...row, cursor: "pointer", paddingRight: 6, alignItems: "center", justifyContent: "space-between" }}>
-                    <span>{s.name} ({s.frequency} @ {s.hour_of_day}:00)</span>
+                    <span>{s.name} ({s.frequency} @ {s.hour_of_day}:00{typeof s.day_of_week === "number" ? `, dow ${s.day_of_week}` : ""}{typeof s.day_of_month === "number" ? `, dom ${s.day_of_month}` : ""}{s.next_run ? `, next ${new Date(s.next_run).toLocaleString()}` : ", paused"})</span>
                     <button style={{ ...btn, background: "#dc2626", padding: "4px 8px", fontSize: "12px" }} onClick={() => deleteReportSchedule(s.id)}>Delete</button>
                   </li>
                 ))}
