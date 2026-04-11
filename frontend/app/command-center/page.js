@@ -213,34 +213,48 @@ export default function CommandCenterPage() {
 
   async function runAttackSimulation() {
     const safeIterations = Math.max(1, Math.min(Number.parseInt(String(simulationForm.iterations), 10) || 1, 5));
-    const res = await fetch(`${API}/demo/simulate-attack`, {
-      method: "POST",
-      headers: authHeaders,
-      body: JSON.stringify({
-        user_id: simulationForm.user_id || "demo.user",
-        source_country: simulationForm.source_country || "UK",
-        destination_country: simulationForm.destination_country || "US",
-        scenario: simulationForm.scenario,
-        iterations: safeIterations,
-        include_noise: !!simulationForm.include_noise,
-        dry_run: !!simulationForm.dry_run,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setToast({ type: "error", message: data?.detail || "Simulation failed" });
-      return;
+    try {
+      const res = await fetch(`${API}/demo/simulate-attack`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          user_id: simulationForm.user_id || "demo.user",
+          source_country: simulationForm.source_country || "UK",
+          destination_country: simulationForm.destination_country || "US",
+          scenario: simulationForm.scenario,
+          iterations: safeIterations,
+          include_noise: !!simulationForm.include_noise,
+          dry_run: !!simulationForm.dry_run,
+        }),
+      });
+
+      const bodyText = await res.text();
+      let data = null;
+      try {
+        data = bodyText ? JSON.parse(bodyText) : null;
+      } catch {
+        data = null;
+      }
+
+      if (!res.ok) {
+        const message = data?.detail || bodyText || "Simulation failed";
+        setToast({ type: "error", message });
+        return;
+      }
+
+      setIngestResult(data);
+      setSimulationResult(data);
+      setToast({
+        type: "success",
+        message: `Simulation completed: ${data?.scenario || "scenario"} (${data?.event_count ?? 0} events)`,
+      });
+      await fetchAlerts();
+      await fetchIncidents();
+      await fetchExecutiveStats();
+      await loadAdvancedAnalytics();
+    } catch {
+      setToast({ type: "error", message: "Simulation request failed unexpectedly" });
     }
-    setIngestResult(data);
-    setSimulationResult(data);
-    setToast({
-      type: "success",
-      message: `Simulation completed: ${data?.scenario || "scenario"} (${data?.event_count ?? 0} events)`,
-    });
-    await fetchAlerts();
-    await fetchIncidents();
-    await fetchExecutiveStats();
-    await loadAdvancedAnalytics();
   }
 
   function getSafeAnalyticsWindow() {
@@ -255,71 +269,92 @@ export default function CommandCenterPage() {
   }
 
   async function loadUebaAnalytics() {
+    if (analyticsLoading) return;
     setAnalyticsError("");
     setAnalyticsLoading(true);
-    const safeWindow = getSafeAnalyticsWindow();
-    const res = await fetch(`${API}/analytics/ueba?window_days=${safeWindow}`, { headers: authHeaders });
-    const data = await res.json();
-    if (!res.ok) {
-      const message = data?.detail || "Failed to load UEBA analytics";
+    try {
+      const safeWindow = getSafeAnalyticsWindow();
+      const res = await fetch(`${API}/analytics/ueba?window_days=${safeWindow}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load UEBA analytics";
+        setAnalyticsError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setAnalyticsWindowDays(String(safeWindow));
+      setUebaSummary(data?.ueba || null);
+      setToast({
+        type: "success",
+        message: `UEBA loaded for ${safeWindow} day window`,
+      });
+    } catch {
+      const message = "Failed to load UEBA analytics";
       setAnalyticsError(message);
       setToast({ type: "error", message });
+    } finally {
       setAnalyticsLoading(false);
-      return;
     }
-    setAnalyticsWindowDays(String(safeWindow));
-    setUebaSummary(data?.ueba || null);
-    setToast({
-      type: "success",
-      message: `UEBA loaded for ${safeWindow} day window`,
-    });
-    setAnalyticsLoading(false);
   }
 
   async function loadMlAnalytics() {
+    if (analyticsLoading) return;
     setAnalyticsError("");
     setAnalyticsLoading(true);
-    const safeWindow = getSafeAnalyticsWindow();
-    const res = await fetch(`${API}/analytics/ml-anomalies?window_days=${safeWindow}`, { headers: authHeaders });
-    const data = await res.json();
-    if (!res.ok) {
-      const message = data?.detail || "Failed to load ML anomalies";
+    try {
+      const safeWindow = getSafeAnalyticsWindow();
+      const res = await fetch(`${API}/analytics/ml-anomalies?window_days=${safeWindow}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load ML anomalies";
+        setAnalyticsError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setAnalyticsWindowDays(String(safeWindow));
+      setMlAnomalies(data?.ml || null);
+      setToast({
+        type: "success",
+        message: `ML anomalies loaded (${data?.ml?.total_anomalies ?? 0} found)`,
+      });
+    } catch {
+      const message = "Failed to load ML anomalies";
       setAnalyticsError(message);
       setToast({ type: "error", message });
+    } finally {
       setAnalyticsLoading(false);
-      return;
     }
-    setAnalyticsWindowDays(String(safeWindow));
-    setMlAnomalies(data?.ml || null);
-    setToast({
-      type: "success",
-      message: `ML anomalies loaded (${data?.ml?.total_anomalies ?? 0} found)`,
-    });
-    setAnalyticsLoading(false);
   }
 
   async function loadAdvancedAnalytics() {
+    if (analyticsLoading) return;
     setAnalyticsError("");
     setAnalyticsLoading(true);
-    const safeWindow = getSafeAnalyticsWindow();
-    const res = await fetch(`${API}/analytics/advanced?window_days=${safeWindow}`, { headers: authHeaders });
-    const data = await res.json();
-    if (!res.ok) {
-      const message = data?.detail || "Failed to load advanced analytics";
+    try {
+      const safeWindow = getSafeAnalyticsWindow();
+      const res = await fetch(`${API}/analytics/advanced?window_days=${safeWindow}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load advanced analytics";
+        setAnalyticsError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setAnalyticsWindowDays(String(safeWindow));
+      setAdvancedAnalytics(data?.advanced || null);
+      setUebaSummary(data?.advanced?.ueba || data?.ueba || null);
+      setMlAnomalies(data?.advanced?.ml || data?.ml || null);
+      setToast({
+        type: "success",
+        message: `Advanced analytics loaded (${safeWindow} day window)`,
+      });
+    } catch {
+      const message = "Failed to load advanced analytics";
       setAnalyticsError(message);
       setToast({ type: "error", message });
+    } finally {
       setAnalyticsLoading(false);
-      return;
     }
-    setAnalyticsWindowDays(String(safeWindow));
-    setAdvancedAnalytics(data?.advanced || null);
-    setUebaSummary(data?.advanced?.ueba || data?.ueba || null);
-    setMlAnomalies(data?.advanced?.ml || data?.ml || null);
-    setToast({
-      type: "success",
-      message: `Advanced analytics loaded (${safeWindow} day window)`,
-    });
-    setAnalyticsLoading(false);
   }
 
   useEffect(() => {
@@ -655,6 +690,9 @@ export default function CommandCenterPage() {
 
       {toast ? (
         <div
+          role={toast.type === "error" ? "alert" : "status"}
+          aria-live={toast.type === "error" ? "assertive" : "polite"}
+          aria-atomic="true"
           style={{
             position: "fixed",
             right: 18,
@@ -668,9 +706,27 @@ export default function CommandCenterPage() {
             boxShadow: "0 12px 30px rgba(2, 6, 23, 0.5)",
             maxWidth: 320,
             fontSize: 13,
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
           }}
         >
-          {toast.message}
+          <span style={{ flex: 1 }}>{toast.message}</span>
+          <button
+            onClick={() => setToast(null)}
+            style={{
+              background: "transparent",
+              border: "1px solid rgba(248, 250, 252, 0.6)",
+              color: "#f8fafc",
+              borderRadius: 6,
+              cursor: "pointer",
+              padding: "0 6px",
+              lineHeight: "18px",
+            }}
+            aria-label="Dismiss notification"
+          >
+            x
+          </button>
         </div>
       ) : null}
 
@@ -789,9 +845,9 @@ export default function CommandCenterPage() {
             onChange={(e) => setAnalyticsWindowDays(e.target.value)}
             placeholder="Window days (1-60)"
           />
-          <button style={btnSecondary} onClick={loadUebaAnalytics}>Load UEBA</button>
-          <button style={btnSecondary} onClick={loadMlAnalytics}>Load ML Anomalies</button>
-          <button style={btn} onClick={loadAdvancedAnalytics}>Load Advanced</button>
+          <button style={btnSecondary} onClick={loadUebaAnalytics} disabled={analyticsLoading}>Load UEBA</button>
+          <button style={btnSecondary} onClick={loadMlAnalytics} disabled={analyticsLoading}>Load ML Anomalies</button>
+          <button style={btn} onClick={loadAdvancedAnalytics} disabled={analyticsLoading}>Load Advanced</button>
         </div>
         {analyticsError ? <p style={{ color: "#f87171", marginBottom: 0 }}>{analyticsError}</p> : null}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10, marginTop: 10 }}>
