@@ -71,6 +71,9 @@ export default function CommandCenterPage() {
   const [mlAnomalies, setMlAnomalies] = useState(null);
   const [advancedAnalytics, setAdvancedAnalytics] = useState(null);
   const [toast, setToast] = useState(null);
+  const [soarExecutionHistory, setSoarExecutionHistory] = useState([]);
+  const [soarLastResult, setSoarLastResult] = useState(null);
+  const [soarIncidentId, setSoarIncidentId] = useState("");
   const [liveSimulationStatus, setLiveSimulationStatus] = useState(null);
   const [liveSimulationForm, setLiveSimulationForm] = useState({ interval_seconds: 25, include_noise: true, rounds: 2 });
   const [executiveStory, setExecutiveStory] = useState(null);
@@ -184,7 +187,54 @@ export default function CommandCenterPage() {
   async function fetchIncidents() {
     const res = await fetch(`${API}/incidents`, { headers: authHeaders });
     const data = await res.json();
-    setIncidents(Array.isArray(data) ? data : []);
+    const rows = Array.isArray(data) ? data : [];
+    setIncidents(rows);
+    if (!soarIncidentId && rows[0]?.id) {
+      setSoarIncidentId(String(rows[0].id));
+    }
+  }
+
+  async function automateIncidentNow() {
+    const incidentId = Number.parseInt(String(soarIncidentId), 10);
+    if (!incidentId) {
+      setToast({ type: "error", message: "Choose a valid incident id for SOAR automation" });
+      return;
+    }
+    try {
+      const res = await fetch(`${API}/automate/incident/${incidentId}`, {
+        method: "POST",
+        headers: authHeaders,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "SOAR automation failed" });
+        return;
+      }
+      setSoarLastResult(data);
+      setToast({ type: "success", message: `SOAR playbook executed: ${data?.playbook || "unknown"}` });
+      try {
+        await fetchIncidents();
+        await fetchAlerts();
+        await loadSoarHistory(incidentId);
+      } catch {
+        setToast({ type: "warning", message: "SOAR playbook executed, but the dashboard refresh failed" });
+      }
+    } catch {
+      setToast({ type: "error", message: "SOAR automation failed" });
+    }
+  }
+
+  async function loadSoarHistory(incidentOverride) {
+    const incidentId = Number.parseInt(String(incidentOverride || soarIncidentId), 10);
+    if (!incidentId) return;
+    try {
+      const res = await fetch(`${API}/soar/executions/${incidentId}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) return;
+      setSoarExecutionHistory(Array.isArray(data?.executions) ? data.executions : []);
+    } catch {
+      // ignore
+    }
   }
 
   async function fetchExecutiveStats() {
@@ -1162,6 +1212,28 @@ export default function CommandCenterPage() {
           </ul>
         </section>
       </div>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>SOAR Auto-Response Control</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 8 }}>
+          <input
+            style={input}
+            type="number"
+            min="1"
+            placeholder="Incident ID"
+            value={soarIncidentId}
+            onChange={(e) => setSoarIncidentId(e.target.value)}
+          />
+          <button style={btn} onClick={automateIncidentNow}>Run Auto Playbook</button>
+          <button style={btnSecondary} onClick={() => loadSoarHistory()}>Load SOAR History</button>
+        </div>
+        <ul style={{ ...list, marginTop: 10 }}>
+          <li style={row}><span>Last Playbook</span><span>{soarLastResult?.playbook || "-"}</span></li>
+          <li style={row}><span>Last Status</span><span>{soarLastResult?.status || "-"}</span></li>
+          <li style={row}><span>Action Count</span><span>{soarLastResult?.actions?.length ?? 0}</span></li>
+          <li style={row}><span>History Entries</span><span>{soarExecutionHistory.length}</span></li>
+        </ul>
+      </section>
 
       <section style={{ ...card, marginTop: 16 }}>
         <h3 style={h3}>Admin Operations Panel</h3>
