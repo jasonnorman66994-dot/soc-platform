@@ -51,6 +51,24 @@ export default function CommandCenterPage() {
   const [editingScheduleId, setEditingScheduleId] = useState(null);
   const [scheduleRunSummary, setScheduleRunSummary] = useState("");
   const [scheduleSummary, setScheduleSummary] = useState({ total: 0, enabled: 0, paused: 0, due: 0 });
+  const [scenarioCatalog, setScenarioCatalog] = useState([]);
+  const [simulationForm, setSimulationForm] = useState({
+    scenario: "credential_compromise_chain",
+    user_id: "demo.user",
+    source_country: "UK",
+    destination_country: "US",
+    iterations: 1,
+    include_noise: false,
+    dry_run: false,
+  });
+  const [simulationResult, setSimulationResult] = useState(null);
+  const [analyticsWindowDays, setAnalyticsWindowDays] = useState("14");
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState("");
+  const [uebaSummary, setUebaSummary] = useState(null);
+  const [mlAnomalies, setMlAnomalies] = useState(null);
+  const [advancedAnalytics, setAdvancedAnalytics] = useState(null);
+  const [toast, setToast] = useState(null);
 
   const authHeaders = useMemo(
     () => ({
@@ -81,6 +99,8 @@ export default function CommandCenterPage() {
     fetchAlerts();
     fetchIncidents();
     fetchExecutiveStats();
+    fetchScenarioCatalog();
+    loadAdvancedAnalytics();
 
     const ws = new WebSocket(`${WS}?tenant_id=${encodeURIComponent(tenantId)}&token=${encodeURIComponent(accessToken)}`);
     ws.onopen = () => setWsState("connected");
@@ -192,17 +212,156 @@ export default function CommandCenterPage() {
   }
 
   async function runAttackSimulation() {
-    const res = await fetch(`${API}/demo/simulate-attack`, {
-      method: "POST",
-      headers: authHeaders,
-      body: JSON.stringify({ user_id: "demo.user", source_country: "UK", destination_country: "US" }),
-    });
-    const data = await res.json();
-    setIngestResult(data);
-    await fetchAlerts();
-    await fetchIncidents();
-    await fetchExecutiveStats();
+    const safeIterations = Math.max(1, Math.min(Number.parseInt(String(simulationForm.iterations), 10) || 1, 5));
+    try {
+      const res = await fetch(`${API}/demo/simulate-attack`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          user_id: simulationForm.user_id || "demo.user",
+          source_country: simulationForm.source_country || "UK",
+          destination_country: simulationForm.destination_country || "US",
+          scenario: simulationForm.scenario,
+          iterations: safeIterations,
+          include_noise: !!simulationForm.include_noise,
+          dry_run: !!simulationForm.dry_run,
+        }),
+      });
+
+      const bodyText = await res.text();
+      let data = null;
+      try {
+        data = bodyText ? JSON.parse(bodyText) : null;
+      } catch {
+        data = null;
+      }
+
+      if (!res.ok) {
+        const message = data?.detail || bodyText || "Simulation failed";
+        setToast({ type: "error", message });
+        return;
+      }
+
+      setIngestResult(data);
+      setSimulationResult(data);
+      setToast({
+        type: "success",
+        message: `Simulation completed: ${data?.scenario || "scenario"} (${data?.event_count ?? 0} events)`,
+      });
+      await fetchAlerts();
+      await fetchIncidents();
+      await fetchExecutiveStats();
+      await loadAdvancedAnalytics();
+    } catch {
+      setToast({ type: "error", message: "Simulation request failed unexpectedly" });
+    }
   }
+
+  function getSafeAnalyticsWindow() {
+    return Math.max(1, Math.min(Number.parseInt(analyticsWindowDays || "14", 10) || 14, 60));
+  }
+
+  async function fetchScenarioCatalog() {
+    if (!accessToken || !tenantId) return;
+    const res = await fetch(`${API}/demo/scenarios`, { headers: authHeaders });
+    const data = await res.json();
+    setScenarioCatalog(Array.isArray(data?.scenarios) ? data.scenarios : []);
+  }
+
+  async function loadUebaAnalytics() {
+    if (analyticsLoading) return;
+    setAnalyticsError("");
+    setAnalyticsLoading(true);
+    try {
+      const safeWindow = getSafeAnalyticsWindow();
+      const res = await fetch(`${API}/analytics/ueba?window_days=${safeWindow}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load UEBA analytics";
+        setAnalyticsError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setAnalyticsWindowDays(String(safeWindow));
+      setUebaSummary(data?.ueba || null);
+      setToast({
+        type: "success",
+        message: `UEBA loaded for ${safeWindow} day window`,
+      });
+    } catch {
+      const message = "Failed to load UEBA analytics";
+      setAnalyticsError(message);
+      setToast({ type: "error", message });
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  async function loadMlAnalytics() {
+    if (analyticsLoading) return;
+    setAnalyticsError("");
+    setAnalyticsLoading(true);
+    try {
+      const safeWindow = getSafeAnalyticsWindow();
+      const res = await fetch(`${API}/analytics/ml-anomalies?window_days=${safeWindow}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load ML anomalies";
+        setAnalyticsError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setAnalyticsWindowDays(String(safeWindow));
+      setMlAnomalies(data?.ml || null);
+      setToast({
+        type: "success",
+        message: `ML anomalies loaded (${data?.ml?.total_anomalies ?? 0} found)`,
+      });
+    } catch {
+      const message = "Failed to load ML anomalies";
+      setAnalyticsError(message);
+      setToast({ type: "error", message });
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  async function loadAdvancedAnalytics() {
+    if (analyticsLoading) return;
+    setAnalyticsError("");
+    setAnalyticsLoading(true);
+    try {
+      const safeWindow = getSafeAnalyticsWindow();
+      const res = await fetch(`${API}/analytics/advanced?window_days=${safeWindow}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        const message = data?.detail || "Failed to load advanced analytics";
+        setAnalyticsError(message);
+        setToast({ type: "error", message });
+        return;
+      }
+      setAnalyticsWindowDays(String(safeWindow));
+      setAdvancedAnalytics(data?.advanced || null);
+      setUebaSummary(data?.advanced?.ueba || data?.ueba || null);
+      setMlAnomalies(data?.advanced?.ml || data?.ml || null);
+      setToast({
+        type: "success",
+        message: `Advanced analytics loaded (${safeWindow} day window)`,
+      });
+    } catch {
+      const message = "Failed to load advanced analytics";
+      setAnalyticsError(message);
+      setToast({ type: "error", message });
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 2800);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   async function createAdminSession() {
     setAdminError("");
@@ -529,6 +688,48 @@ export default function CommandCenterPage() {
         </Link>
       </div>
 
+      {toast ? (
+        <div
+          role={toast.type === "error" ? "alert" : "status"}
+          aria-live={toast.type === "error" ? "assertive" : "polite"}
+          aria-atomic="true"
+          style={{
+            position: "fixed",
+            right: 18,
+            top: 18,
+            zIndex: 3000,
+            background: toast.type === "error" ? "#7f1d1d" : "#064e3b",
+            color: "#f8fafc",
+            border: `1px solid ${toast.type === "error" ? "#ef4444" : "#22c55e"}`,
+            borderRadius: 8,
+            padding: "10px 12px",
+            boxShadow: "0 12px 30px rgba(2, 6, 23, 0.5)",
+            maxWidth: 320,
+            fontSize: 13,
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
+          }}
+        >
+          <span style={{ flex: 1 }}>{toast.message}</span>
+          <button
+            onClick={() => setToast(null)}
+            style={{
+              background: "transparent",
+              border: "1px solid rgba(248, 250, 252, 0.6)",
+              color: "#f8fafc",
+              borderRadius: 6,
+              cursor: "pointer",
+              padding: "0 6px",
+              lineHeight: "18px",
+            }}
+            aria-label="Dismiss notification"
+          >
+            x
+          </button>
+        </div>
+      ) : null}
+
       <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button style={useDemoMode ? btn : btnSecondary} onClick={() => setUseDemoMode(true)}>Demo Mode</button>
         <button style={!useDemoMode ? btn : btnSecondary} onClick={() => setUseDemoMode(false)}>Live Tenant Mode</button>
@@ -556,12 +757,109 @@ export default function CommandCenterPage() {
 
       <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
         <button onClick={sendTestIngest} style={btn}>POST /ingest Test Attack</button>
-        <button onClick={runAttackSimulation} style={btn}>POST /demo/simulate-attack</button>
+        <button onClick={runAttackSimulation} style={btn}>Run Safe-Lab Simulation</button>
         <button onClick={blockIp} style={btn}>POST /respond/block-ip</button>
         <button onClick={refreshAccess} style={btnSecondary}>Refresh Access Token</button>
         <button onClick={fetchAlerts} style={btnSecondary}>Refresh Alerts</button>
         <button onClick={fetchIncidents} style={btnSecondary}>Refresh Incidents</button>
       </div>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>Safe-Lab Scenario Simulation</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
+          <select
+            style={input}
+            value={simulationForm.scenario}
+            onChange={(e) => setSimulationForm((s) => ({ ...s, scenario: e.target.value }))}
+          >
+            {(scenarioCatalog.length ? scenarioCatalog : [{ id: "credential_compromise_chain", name: "Credential Compromise Chain" }]).map((s) => (
+              <option key={s.id} value={s.id}>{s.name || s.id}</option>
+            ))}
+          </select>
+          <input
+            style={input}
+            placeholder="User ID"
+            value={simulationForm.user_id}
+            onChange={(e) => setSimulationForm((s) => ({ ...s, user_id: e.target.value }))}
+          />
+          <input
+            style={input}
+            placeholder="Source Country"
+            value={simulationForm.source_country}
+            onChange={(e) => setSimulationForm((s) => ({ ...s, source_country: e.target.value }))}
+          />
+          <input
+            style={input}
+            placeholder="Destination Country"
+            value={simulationForm.destination_country}
+            onChange={(e) => setSimulationForm((s) => ({ ...s, destination_country: e.target.value }))}
+          />
+          <input
+            style={input}
+            type="number"
+            min="1"
+            max="5"
+            placeholder="Iterations"
+            value={simulationForm.iterations}
+            onChange={(e) => setSimulationForm((s) => ({ ...s, iterations: e.target.value }))}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+          <label style={{ color: "#cbd5e1", display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={simulationForm.include_noise}
+              onChange={(e) => setSimulationForm((s) => ({ ...s, include_noise: e.target.checked }))}
+            />
+            Include Noise
+          </label>
+          <label style={{ color: "#cbd5e1", display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={simulationForm.dry_run}
+              onChange={(e) => setSimulationForm((s) => ({ ...s, dry_run: e.target.checked }))}
+            />
+            Dry Run
+          </label>
+          <button onClick={runAttackSimulation} style={btn}>POST /demo/simulate-attack</button>
+        </div>
+        {simulationResult ? (
+          <ul style={{ ...list, marginTop: 10 }}>
+            <li style={row}><span>Scenario</span><span>{simulationResult.scenario || "-"}</span></li>
+            <li style={row}><span>Events Emitted</span><span>{simulationResult.event_count ?? "-"}</span></li>
+            <li style={row}><span>Iterations</span><span>{simulationResult.iterations ?? "-"}</span></li>
+            <li style={row}><span>Dry Run</span><span>{simulationResult.dry_run ? "yes" : "no"}</span></li>
+          </ul>
+        ) : null}
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>Advanced Analytics (UEBA + ML)</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 8 }}>
+          <input
+            style={input}
+            type="number"
+            min="1"
+            max="60"
+            value={analyticsWindowDays}
+            onChange={(e) => setAnalyticsWindowDays(e.target.value)}
+            placeholder="Window days (1-60)"
+          />
+          <button style={btnSecondary} onClick={loadUebaAnalytics} disabled={analyticsLoading}>Load UEBA</button>
+          <button style={btnSecondary} onClick={loadMlAnalytics} disabled={analyticsLoading}>Load ML Anomalies</button>
+          <button style={btn} onClick={loadAdvancedAnalytics} disabled={analyticsLoading}>Load Advanced</button>
+        </div>
+        {analyticsError ? <p style={{ color: "#f87171", marginBottom: 0 }}>{analyticsError}</p> : null}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10, marginTop: 10 }}>
+          <div style={miniCard}><div style={miniTitle}>Window (days)</div><div>{analyticsWindowDays}</div></div>
+          <div style={miniCard}><div style={miniTitle}>UEBA Users</div><div>{uebaSummary?.total_users ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>UEBA High Risk</div><div>{uebaSummary?.high_risk_users ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>ML Anomalies</div><div>{mlAnomalies?.total_anomalies ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Events (Advanced)</div><div>{advancedAnalytics?.overview?.event_count ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Alerts (Advanced)</div><div>{advancedAnalytics?.overview?.alert_count ?? "-"}</div></div>
+        </div>
+        {analyticsLoading ? <p style={{ color: "#94a3b8", marginBottom: 0 }}>Loading analytics...</p> : null}
+      </section>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12, marginTop: 16 }}>
         <section style={card}><h3 style={h3}>Total Incidents</h3><div>{execStats?.total_incidents ?? "-"}</div></section>
