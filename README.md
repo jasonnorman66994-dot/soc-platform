@@ -88,6 +88,122 @@ Environment variables for SOC dashboard routing:
 - `SOC_CORE_REDIS_URL` for API/worker realtime relay backing
 - `SOC_CORE_REALTIME_CHANNEL` for Redis pubsub channel name
 
+### Phase 7 SOAR Integrations (Automated Response)
+
+Plug-and-play integrations with external systems:
+
+- `backend/integrations/identity.py` - Account control (disable/enable, revoke sessions, force password reset, MFA)
+- `backend/integrations/network.py` - Network blocking (IP/domain blocking, subnet isolation)
+- `backend/integrations/messaging.py` - Alerting (Slack, Teams, email, webhook, SIEM forwarding)
+- `backend/soar/playbooks.py` - Orchestrated response workflows
+
+SOAR API Endpoints:
+
+- `POST /automate/incident/{incident_id}` - Execute intelligent playbook for incident
+- `POST /automate/incident/{incident_id}/playbook/{type}` - Execute specific playbook
+- `GET /soar/executions/{incident_id}` - View automation execution history
+
+Playbooks available:
+
+- `account_takeover` - Disable user, revoke sessions, enforce MFA
+- `suspicious_ip` - Block IP, isolate subnet, notify
+- `phishing` - Block domain, notify users, escalate
+- `data_exfiltration` - Block IP, disable user, isolate, escalate
+
+### Phase 8 Incident Management (Response Workflow)
+
+Comprehensive incident lifecycle management:
+
+- `backend/incidents/service.py` - Incident service layer with CRUD, timeline, response tracking
+- Timeline events - Track all incident actions and state changes
+- Analyst notes - Annotate incidents with investigation findings
+- Response tracking - Log all automated and manual actions
+- Incident aggregation - Group related incidents
+
+Incident Management API Endpoints:
+
+- `PUT /incidents/{incident_id}/status` - Update status with reason
+- `POST /incidents/{incident_id}/notes` - Add analyst notes
+- `GET /incidents/{incident_id}/timeline` - View incident timeline
+- `GET /incidents/{incident_id}/response-summary` - View response actions
+- `POST /incidents/{incident_id}/close` - Close incident with resolution
+
+### Phase 9 AI Analyst (Intelligent Analysis)
+
+Advanced AI-driven incident analysis:
+
+- `backend/engine/ai.py` Enhanced AIAnalyzer class with:
+  - Attack narrative generation
+  - Business impact assessment
+  - Numerical risk scoring (0-100)
+  - Root cause analysis
+  - Affected assets identification
+  - MITRE ATT&CK technique mapping
+  - Prioritized recommendations
+  - Containment time estimation
+
+AI Analyst Endpoint Response:
+
+```json
+{
+  "incident_id": 123,
+  "analysis_timestamp": "2026-04-10T...",
+  "confidence": 0.85,
+  "summary": "Attack narrative",
+  "impact": {"scope": "enterprise-wide", "affected_users": "..."},
+  "risk_score": 85,
+  "risk_level": "HIGH",
+  "root_cause": {"likely_cause": "...", "entry_points": [...]},
+  "affected_assets": {"users": [...], "ips": [...], "systems": [...]},
+  "mitre_techniques": ["T1078", "T1110"],
+  "recommendations": [
+    {"priority": "immediate", "action": "...", "rationale": "...", "estimated_time": "..."}
+  ],
+  "next_steps": ["1. ...", "2. ..."],
+  "estimated_mttc": "15-30 minutes"
+}
+```
+
+### Phase 10 Production Deployment (Cloud-Ready)
+
+Enterprise-grade deployment infrastructure:
+
+**Kubernetes**:
+
+- `infrastructure/k8s/api-deployment.yaml` - Production API deployment (3+ replicas, HPA, resources, health checks)
+- `infrastructure/k8s/namespace-and-secrets.yaml` - Namespace, secrets, PVs, Ingress, certificate management
+- Auto-scaling (3-10 replicas based on CPU/Memory)
+- Network policies for pod-to-pod isolation
+- Pod disruption budgets for HA
+
+**NGINX Reverse Proxy**:
+
+- `nginx/soc-platform.conf` - Production NGINX config with:
+
+  - HTTPS/TLS termination
+  - Rate limiting (API, login, WebSocket)
+  - Security headers (HSTS, CSP, X-Frame-Options, etc.)
+  - Gzip compression
+  - WebSocket support
+  - Caching strategies
+  - Load balancing
+
+**Let's Encrypt Integration**:
+
+- Automated certificate provisioning via cert-manager
+- Auto-renewal (90-day lifecycle)
+- ACME HTTP-01 validation
+
+**Deployment Targets Supported**:
+
+- Kubernetes (GKE, EKS, AKS, on-prem)
+- Docker Compose (development/testing)
+- AWS (ECR + ECS or CloudFormation)
+- GCP (Cloud Run or GKE)
+- Azure (AKS or Container Instances)
+
+See `DEPLOYMENT_GUIDE.md` for detailed deployment instructions by platform.
+
 ## Services
 
 - backend: FastAPI gateway with multi-tenant isolation, onboarding, billing scaffold, audit logs, executive metrics

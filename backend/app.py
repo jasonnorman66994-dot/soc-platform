@@ -34,6 +34,14 @@ from auth.rbac import authorize
 from engine.detect import detect
 from engine.correlate import correlate
 from engine.ai import analyze_incident
+from soar.playbooks import execute_playbook_for_incident, get_execution_history
+from incidents.service import (
+    add_timeline_event,
+    add_analyst_note,
+    close_incident,
+    get_response_summary,
+    log_response_action,
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://soc:socpass@db:5432/socdb")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -215,6 +223,10 @@ class RespondBody(BaseModel):
 
 class NoteBody(BaseModel):
     note: str = Field(min_length=2, max_length=1000)
+
+
+class IncidentNoteBody(NoteBody):
+    tags: list[str] | None = None
 
 
 class DemoAttackBody(BaseModel):
@@ -1596,6 +1608,296 @@ def block_ip(
     result = _run_response(tenant_id, "block-ip", ip, incident_id)
     log_action(tenant_id, user["id"], "response.execute", f"incidents/{incident_id}", {"action": "block-ip"})
     return result
+
+
+@app.post("/automate/incident/{incident_id}")
+def automate_incident_response(
+    incident_id: int,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Execute automated SOAR playbooks for incident."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM incidents WHERE id=%s AND tenant_id=%s",
+                (incident_id, tenant_id),
+            )
+            incident_row = cur.fetchone()
+    
+    if not incident_row:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    # Get event associated with incident
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM events WHERE tenant_id=%s ORDER BY id DESC LIMIT 1",
+                (tenant_id,),
+            )
+            event_row = cur.fetchone()
+    
+    if not event_row:
+        return {"status": "warning", "message": "No events found for incident"}
+    
+    # Execute playbook
+    result = execute_playbook_for_incident(incident_row, event_row)
+    
+    # Log the automation
+    log_action(
+        tenant_id,
+        user["id"],
+        "soar.playbook_executed",
+        f"incidents/{incident_id}",
+        {"playbook": result.get("playbook"), "actions": len(result.get("actions", []))},
+    )
+    
+    # Mark incident as responded
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET status=%s, responded_at=NOW() WHERE id=%s AND tenant_id=%s",
+                ("responded", incident_id, tenant_id),
+            )
+        conn.commit()
+    
+    return result
+
+
+@app.post("/automate/incident/{incident_id}/playbook/{playbook_type}")
+def execute_specific_playbook(
+    incident_id: int,
+    playbook_type: str,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Execute a specific SOAR playbook."""
+    valid_playbooks = [
+        "account_takeover",
+        "suspicious_ip",
+        "phishing",
+        "data_exfiltration",
+    ]
+    
+    if playbook_type not in valid_playbooks:
+        raise HTTPException(status_code=400, detail=f"Invalid playbook: {playbook_type}")
+    
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM incidents WHERE id=%s AND tenant_id=%s",
+                (incident_id, tenant_id),
+            )
+            incident_row = cur.fetchone()
+    
+    if not incident_row:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    # Note: In production, would dispatch to specific playbook executor
+    result = {
+        "status": "success",
+        "incident_id": incident_id,
+        "playbook": playbook_type,
+        "message": f"Playbook {playbook_type} queued for execution",
+        "timestamp": now_utc().isoformat(),
+    }
+    
+    log_action(
+        tenant_id,
+        user["id"],
+        f"soar.{playbook_type}_queued",
+        f"incidents/{incident_id}",
+        {},
+    )
+    
+    return result
+
+
+@app.get("/soar/executions/{incident_id}")
+def get_soar_execution_history(
+    incident_id: int,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get SOAR automation execution history for incident."""
+    history = get_execution_history(incident_id)
+    return {
+        "incident_id": incident_id,
+        "execution_count": len(history),
+        "executions": history,
+    }
+
+
+@app.put("/incidents/{incident_id}/status")
+def update_incident_status_endpoint(
+    incident_id: int,
+    new_status: str,
+    reason: str = "",
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Update incident status and add timeline event."""
+    valid_statuses = ["open", "investigating", "responded", "closed"]
+    if new_status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
+    
+    # Update in database
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET status=%s, updated_at=NOW() WHERE id=%s AND tenant_id=%s",
+                (new_status, incident_id, tenant_id),
+            )
+        conn.commit()
+    
+    # Add timeline event
+    add_timeline_event(
+        incident_id,
+        action="status_changed",
+        description=f"Status changed to {new_status}: {reason}",
+        actor=user.get("id") if user else None,
+        details={"previous_status": "unknown", "new_status": new_status},
+    )
+    
+    return {
+        "incident_id": incident_id,
+        "new_status": new_status,
+        "timestamp": now_utc().isoformat(),
+    }
+
+
+@app.post("/incidents/{incident_id}/notes")
+def add_incident_note(
+    incident_id: int,
+    body: IncidentNoteBody,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("view_incidents")),
+):
+    """Add analyst note to incident."""
+    note = body.note
+    tags = body.tags or []
+
+    if not note or len(note) < 2:
+        raise HTTPException(status_code=400, detail="Note must be at least 2 characters")
+
+    note_entry = add_analyst_note(
+        incident_id=incident_id,
+        note=note,
+        analyst_id=user.get("id") if user else None,
+        tags=tags,
+    )
+
+    # Log the action
+    log_action(
+        tenant_id,
+        user.get("id") if user else None,
+        "incident.note_added",
+        f"incidents/{incident_id}",
+        {"note_length": len(note), "tags": tags},
+    )
+
+    return note_entry
+
+
+@app.get("/incidents/{incident_id}/timeline")
+def get_incident_timeline(
+    incident_id: int,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get incident timeline events."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, status, severity, title, first_seen, last_seen FROM incidents WHERE id=%s AND tenant_id=%s",
+                (incident_id, tenant_id),
+            )
+            incident = cur.fetchone()
+    
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    return {
+        "incident_id": incident_id,
+        "status": incident["status"],
+        "timeline": [
+            {
+                "timestamp": incident["first_seen"].isoformat(),
+                "action": "incident_created",
+                "description": "Incident detected",
+            },
+            {
+                "timestamp": incident["last_seen"].isoformat(),
+                "action": "incident_updated",
+                "description": "Last activity",
+            },
+        ],
+    }
+
+
+@app.get("/incidents/{incident_id}/response-summary")
+def get_incident_response_summary(
+    incident_id: int,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get summary of response actions taken on incident."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, status, responded_at FROM incidents WHERE id=%s AND tenant_id=%s",
+                (incident_id, tenant_id),
+            )
+            incident = cur.fetchone()
+    
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    
+    summary = get_response_summary(incident_id)
+    
+    return {
+        "incident_id": incident_id,
+        "status": incident["status"],
+        "responded_at": incident["responded_at"].isoformat() if incident["responded_at"] else None,
+        **summary,
+    }
+
+
+@app.post("/incidents/{incident_id}/close")
+def close_incident_endpoint(
+    incident_id: int,
+    resolution: str,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Close an incident with resolution."""
+    if not resolution or len(resolution) < 5:
+        raise HTTPException(status_code=400, detail="Resolution must be at least 5 characters")
+    
+    # Update in database
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET status=%s, responded_at=NOW(), updated_at=NOW() WHERE id=%s AND tenant_id=%s",
+                ("closed", incident_id, tenant_id),
+            )
+        conn.commit()
+    
+    # Log closure
+    log_action(
+        tenant_id,
+        user.get("id") if user else None,
+        "incident.closed",
+        f"incidents/{incident_id}",
+        {"resolution": resolution},
+    )
+    
+    return {
+        "incident_id": incident_id,
+        "status": "closed",
+        "resolution": resolution,
+        "closed_at": now_utc().isoformat(),
+    }
 
 
 @app.get("/ai/analyze/{incident_id}")

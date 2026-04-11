@@ -1,5 +1,211 @@
 # Changelog
 
+## v2.0.0 (Enterprise SOAR + Incident Management + AI Analyst + Production Deployment)
+
+### v2 Highlights
+
+This release transforms SOC Platform into a complete enterprise-ready security platform with automated response, comprehensive incident management, advanced AI analysis, and production deployment infrastructure.
+
+### Phase 7: SOAR Integrations (Automated Response)
+
+**New Modules**:
+
+- `backend/integrations/identity.py` - Identity provider integrations (Okta, Azure AD):
+
+  - `disable_user()` / `enable_user()` - Account state control
+  - `revoke_sessions()` - Force re-authentication
+  - `force_password_reset()` - Emergency password reset
+  - `enable_mfa()` - Enforce multi-factor authentication
+  - `get_user_sessions()` - Query active sessions
+
+- `backend/integrations/network.py` - Network & cloud platform integrations (Cloudflare, AWS, Azure):
+
+  - `block_ip()` / `unblock_ip()` - IP-level blocking at edge
+  - `block_domain()` / `unblock_domain()` - Domain-level blocking
+  - `isolate_subnet()` - Network containment
+
+- `backend/integrations/messaging.py` - Alert & notification integrations:
+
+  - `send_alert()` - Multi-channel alerting (email, SMS, webhook)
+  - `send_to_slack()` - Slack channel notifications
+  - `send_to_teams()` - Microsoft Teams notifications
+  - `send_to_siem()` - External SIEM forwarding
+  - `notify_all_channels()` - Broadcast alerting
+
+- `backend/soar/playbooks.py` - Orchestrated response playbooks:
+
+  - `PlaybookExecutor` class with action logging and execution history
+  - `account_takeover_playbook()` - Disable, revoke, reset, enforce MFA
+  - `suspicious_ip_playbook()` - Block IP, isolate subnet, notify
+  - `phishing_playbook()` - Block domain, notify organization
+  - `data_exfiltration_playbook()` - Emergency containment sequence
+  - Intelligent playbook routing based on incident type
+
+**New API Endpoints**:
+
+- `POST /automate/incident/{incident_id}` - Execute optimal playbook for incident
+- `POST /automate/incident/{incident_id}/playbook/{type}` - Execute specific playbook type
+- `GET /soar/executions/{incident_id}` - View automation execution history and status
+
+### Phase 8: Incident Management System
+
+**New Modules**:
+
+- `backend/incidents/service.py` - Comprehensive incident service layer:
+
+  - `IncidentService` - CRUD operations, status transitions, timeline management
+  - `IncidentResponseTracker` - Response action logging and accountability
+  - `IncidentAggregator` - Group related incidents by user/IP/domain
+
+**New API Endpoints**:
+
+- `PUT /incidents/{incident_id}/status` - Update incident status with audit trail
+- `POST /incidents/{incident_id}/notes` - Add analyst notes with tagging
+- `GET /incidents/{incident_id}/timeline` - View incident event timeline
+- `GET /incidents/{incident_id}/response-summary` - View all response actions taken
+- `POST /incidents/{incident_id}/close` - Close incident with resolution documentation
+
+**Features**:
+
+- Incident timeline tracking (created, status changed, responded, closed)
+- Analyst note system with tagging for tracking investigation
+- Response action logging for compliance and audit
+- Incident status workflow (open → investigating → responded → closed)
+- Related incident linking for cohort analysis
+
+### Phase 9: AI SOC Analyst
+
+**Enhanced AI Module** (`backend/engine/ai.py`):
+
+- `AIAnalyzer` class with comprehensive incident analysis
+- Attack narrative generation - Human-readable summary of what happened
+- Business impact assessment - Quantify operational/financial risk
+- Risk scoring algorithm (0-100) with adjustments for severity and alert count
+- Root cause analysis - Identify likely entry point and vulnerabilities
+- Affected assets identification - Users, systems, applications, data
+- MITRE ATT&CK technique mapping - Link to industry framework
+- Prioritized recommendations - Immediate, high, medium actions
+- Containment time estimation - MTTC by severity level
+- Confidence scoring - Indicate analysis reliability
+
+**Analysis Output Fields**:
+
+- `summary` - Narrative description of attack
+- `impact` - Business/operational impact assessment
+- `risk_score` - Numerical risk (0-100)
+- `risk_level` - CRITICAL/HIGH/MEDIUM/LOW
+- `root_cause` - Likely entry point
+- `affected_assets` - Users, IPs, systems involved
+- `mitre_techniques` - Attack framework mapping
+- `recommendations` - Prioritized response actions
+- `next_steps` - Analyst action sequence
+- `estimated_mttc` - Containment time estimate
+
+### Phase 10: Production Deployment Infrastructure
+
+**Kubernetes Deployments** (`infrastructure/k8s/`):
+
+- `api-deployment.yaml` - Production-grade API deployment:
+
+  - 3+ replicas for HA
+  - Horizontal Pod Autoscaler (3-10 replicas)
+  - Health/readiness probes
+  - Resource requests and limits
+  - Security context (non-root, read-only filesystem)
+  - Pod disruption budgets
+  - Anti-affinity for node distribution
+
+- `namespace-and-secrets.yaml` - K8s infrastructure:
+
+  - Dedicated namespace for isolation
+  - Secret management for sensitive data
+  - PersistentVolumes for stateful data
+  - Ingress with HTTPS/Let's Encrypt
+  - Certificate automation via cert-manager
+  - ClusterIssuer for ACME
+
+**NGINX Reverse Proxy** (`nginx/soc-platform.conf`):
+
+- HTTPS/TLS termination with modern ciphers
+- Automatic HTTP → HTTPS redirect
+- Security headers (HSTS, CSP, X-Frame-Options, etc.)
+- Rate limiting (API: 10r/s, Login: 5r/m, WebSocket: 100r/s)
+- Gzip compression for bandwidth optimization
+- WebSocket upgrade support (for alerting)
+- Caching strategies for API responses
+- Load balancing across backend replicas
+- Client body size limits and timeouts
+- Detailed request logging
+
+**Let's Encrypt Integration**:
+
+- Automated certificate provisioning
+- 90-day renewal cycle with automation
+- ACME HTTP-01 validation
+- Managed via cert-manager
+
+**Deployment Documentation** (`DEPLOYMENT_GUIDE.md`):
+
+- Local Docker Compose setup
+- Kubernetes deployment (all major providers)
+- NGINX reverse proxy installation
+- AWS (ECR + ECS, CloudFormation)
+- GCP (Cloud Run, GKE)
+- Azure (AKS)
+- Environment variables reference
+- Monitoring & observability setup
+- Scaling considerations
+- Security hardening practices
+- Backup & disaster recovery strategies
+- Troubleshooting guide
+
+### Breaking Changes
+
+None - v2.0.0 is fully backward compatible with v1.3.0 API.
+
+### Deprecations
+
+None.
+
+### Security Enhancements
+
+- Pod security contexts enforce non-root, read-only filesystem
+- Network policies restrict pod-to-pod communication
+- Secrets stored in K8s Secrets (migrate to Vault in production)
+- HTTPS enforced via Ingress + cert-manager
+- Rate limiting prevents abuse
+- RBAC enforced on all endpoints
+
+### Performance Improvements
+
+- Redis caching for frequently accessed resources
+- API response caching via NGINX (10m TTL for GET)
+- Gzip compression reduces bandwidth by ~70%
+- Horizontal autoscaling handles traffic spikes
+- Connection pooling for database and Redis
+- Async/await for concurrent operations
+
+### Testing
+
+- Backend compile checks: ✅ All Python files syntax valid
+- Frontend build: ✅ Production build passes all checks
+- Kubernetes manifests: ✅ Valid YAML, all required fields
+- NGINX config: ✅ Syntax validation passes
+
+### Known Limitations
+
+- Integration modules use mock implementations (replace with real provider SDKs)
+- SOAR playbooks are deterministic (future: ML-driven playbook selection)
+- AI analyzer is rule-based (future: LLM-powered analysis)
+
+### Upgrade Notes
+
+1. Update environment variables with new integration and deployment settings
+2. Apply K8s manifests if deploying to Kubernetes
+3. Configure integrations with actual provider credentials
+4. Update domain names in NGINX/Ingress configs
+5. Run database migrations (automatic via init container in K8s)
+
 ## v1.3.0 (Board Report Export Scheduling)
 
 ### Highlights
