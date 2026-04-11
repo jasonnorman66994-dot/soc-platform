@@ -5,6 +5,31 @@
 Frontend (Next.js) -> Nginx -> API Gateway (FastAPI) -> Multi-Tenant Auth (JWT access+refresh + RBAC)
 -> API-Key Ingestion -> Detection Marketplace -> Correlation + AI Analyst -> PostgreSQL + Redis -> WebSocket UI
 
+### Modular SOC Scaffold (Phase Foundation)
+
+The repository now includes a modular SOC pipeline layout for incremental hardening:
+
+- `backend/ingestion/` (ingestion service prototype)
+- `backend/detection/` (rule evaluation modules)
+- `backend/correlation/` (correlation components)
+- `backend/api/` (future API package split)
+- `backend/workers/` (stream/background workers)
+- `frontend/dashboard/`, `frontend/components/`, `frontend/visualizations/`
+- `infrastructure/docker/`, `infrastructure/terraform/`, `infrastructure/k8s/`
+- `data/`, `tests/`
+
+Prototype ingestion service entrypoint:
+
+```bash
+cd backend
+uvicorn ingestion.server:app --reload --host 0.0.0.0 --port 8010
+```
+
+Prototype endpoints:
+
+- `POST /ingest` accepts a `LogEvent` payload and returns basic detection alerts.
+- `GET /events` returns buffered ingested events.
+
 ## Services
 
 - backend: FastAPI gateway with multi-tenant isolation, onboarding, billing scaffold, audit logs, executive metrics
