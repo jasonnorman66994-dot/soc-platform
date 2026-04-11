@@ -922,8 +922,107 @@ class VoiceCommandBody(BaseModel):
     command: str = Field(..., min_length=2, max_length=200)
 
 
+class TelemetryEvent(BaseModel):
+    agent_id: str = Field(min_length=2, max_length=128)
+    hostname: str = Field(min_length=1, max_length=256)
+    event_type: str = Field(min_length=2, max_length=64)  # process_start | net_connect | heartbeat
+    timestamp: str | None = None
+    pid: int | None = None
+    process_name: str | None = Field(default=None, max_length=256)
+    remote_ip: str | None = Field(default=None, max_length=64)
+    remote_port: int | None = None
+    local_port: int | None = None
+    meta: dict | None = None
+
+
+class DrillRequest(BaseModel):
+    drill_type: str = Field(min_length=2, max_length=64)  # brute_force | phishing_sim | ghost_mode_test | jit_test
+    target_user: str | None = Field(default=None, max_length=128)
+    iterations: int = Field(default=5, ge=1, le=50)
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Threat Intelligence Service (The Oracle)
+# ---------------------------------------------------------------------------
+_THREAT_INTEL_FEED: dict[str, dict] = {}  # ip -> {source, category, risk, last_seen}
+_THREAT_INTEL_LAST_POLL: float = 0.0
+_THREAT_INTEL_POLL_INTERVAL = 300  # seconds
+
+# Mock global blocklist (simulates AlienVault OTX / abuse.ch feeds)
+_MOCK_THREAT_FEED = {
+    "198.51.100.1": {"source": "AlienVault OTX", "category": "C2", "risk": 1.0, "tags": ["botnet", "c2-server"]},
+    "203.0.113.66": {"source": "abuse.ch", "category": "malware", "risk": 1.0, "tags": ["ransomware", "dropper"]},
+    "192.0.2.99": {"source": "AlienVault OTX", "category": "scanner", "risk": 0.85, "tags": ["mass-scanner"]},
+    "198.51.100.200": {"source": "ThreatFox", "category": "phishing", "risk": 0.95, "tags": ["credential-harvester"]},
+    "203.0.113.42": {"source": "abuse.ch", "category": "brute_force", "risk": 0.9, "tags": ["ssh-bruteforce"]},
+}
+
+
+def poll_threat_intel_feed() -> dict[str, dict]:
+    """Poll global threat intel feed. Returns current feed state."""
+    global _THREAT_INTEL_LAST_POLL
+    import time as _time
+    now = _time.time()
+    if now - _THREAT_INTEL_LAST_POLL < _THREAT_INTEL_POLL_INTERVAL and _THREAT_INTEL_FEED:
+        return _THREAT_INTEL_FEED
+    # In production: fetch from AlienVault OTX API, abuse.ch, etc.
+    _THREAT_INTEL_FEED.clear()
+    _THREAT_INTEL_FEED.update(_MOCK_THREAT_FEED)
+    _THREAT_INTEL_LAST_POLL = now
+    return _THREAT_INTEL_FEED
+
+
+def check_threat_intel(ip: str | None) -> dict | None:
+    """Check if an IP matches a known threat intel indicator."""
+    if not ip:
+        return None
+    feed = poll_threat_intel_feed()
+    return feed.get(ip)
+
+
+# ---------------------------------------------------------------------------
+# Distributed Agent Registry (The Hunter)
+# ---------------------------------------------------------------------------
+_REGISTERED_AGENTS: dict[str, dict] = {}  # agent_id -> {hostname, last_seen, status, event_count}
+_TELEMETRY_BUFFER: list[dict] = []  # recent telemetry events (capped)
+_TELEMETRY_BUFFER_MAX = 500
+
+
+def register_agent_heartbeat(agent_id: str, hostname: str):
+    """Update agent registry with heartbeat."""
+    _REGISTERED_AGENTS[agent_id] = {
+        "hostname": hostname,
+        "last_seen": now_utc().isoformat(),
+        "status": "active",
+        "event_count": _REGISTERED_AGENTS.get(agent_id, {}).get("event_count", 0),
+    }
+
+
+def buffer_telemetry(event: dict):
+    """Add telemetry event to buffer."""
+    _TELEMETRY_BUFFER.append(event)
+    if len(_TELEMETRY_BUFFER) > _TELEMETRY_BUFFER_MAX:
+        del _TELEMETRY_BUFFER[:len(_TELEMETRY_BUFFER) - _TELEMETRY_BUFFER_MAX]
+    agent_id = event.get("agent_id")
+    if agent_id and agent_id in _REGISTERED_AGENTS:
+        _REGISTERED_AGENTS[agent_id]["event_count"] = _REGISTERED_AGENTS[agent_id].get("event_count", 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Simulation Engine (The Architect) — drill tracking
+# ---------------------------------------------------------------------------
+_DRILL_HISTORY: list[dict] = []  # list of drill results
+_DRILL_HISTORY_MAX = 100
+
+
+def record_drill(drill: dict):
+    _DRILL_HISTORY.append(drill)
+    if len(_DRILL_HISTORY) > _DRILL_HISTORY_MAX:
+        del _DRILL_HISTORY[:len(_DRILL_HISTORY) - _DRILL_HISTORY_MAX]
 
 
 # ---------------------------------------------------------------------------
@@ -2689,6 +2788,18 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
         if risk_score >= 90 and event.user_id:
             jit_revoke_user_sessions(tenant_id, event.user_id, reason="automated_risk_spike")
 
+        # Threat Intel check: if IP matches known bad actor, force max risk + JIT revoke
+        _threat_match = check_threat_intel(event.ip)
+        if _threat_match:
+            risk_score = 100
+            ml_risk_boost = max(ml_risk_boost, 15)
+            if event.user_id:
+                jit_revoke_user_sessions(tenant_id, event.user_id, reason="threat_intel_match")
+            log_action(tenant_id, None, "threat_intel.match", f"events/{saved_event['id']}", {
+                "ip": event.ip, "source": _threat_match.get("source"),
+                "category": _threat_match.get("category"), "tags": _threat_match.get("tags"),
+            })
+
         active_soar_policy = _get_cached_soar_policy(tenant_id)
         selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
 
@@ -3577,11 +3688,239 @@ async def voice_command_endpoint(
         _save_soar_policy(tenant_id, policy)
         result = {"command": "disable_ghost_mode", "status": "disabled"}
 
+    elif command in ("run_security_drill", "security_drill", "run_drill"):
+        drill_result = await _execute_security_drill(tenant_id, "brute_force", user, iterations=5)
+        result = {"command": "run_security_drill", "status": "completed", "drill": drill_result}
+
     else:
-        result = {"command": command, "status": "unrecognized", "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode"}
+        result = {"command": command, "status": "unrecognized", "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill"}
 
     log_action(tenant_id, user["id"], "voice.command", "voice", {"command": command, "result_status": result.get("status")})
     return result
+
+
+# ---------------------------------------------------------------------------
+# Telemetry Ingest — Distributed Agent Data (The Hunter)
+# ---------------------------------------------------------------------------
+
+@app.post("/telemetry/ingest")
+async def telemetry_ingest(
+    events: list[TelemetryEvent],
+    tenant_id: str = Depends(get_tenant),
+    _key=Depends(validate_api_key),
+):
+    """Ingest telemetry from distributed agents (process starts, network connections)."""
+    processed = 0
+    threat_matches = []
+    for ev in events:
+        register_agent_heartbeat(ev.agent_id, ev.hostname)
+        entry = {
+            "agent_id": ev.agent_id,
+            "hostname": ev.hostname,
+            "event_type": ev.event_type,
+            "timestamp": ev.timestamp or now_utc().isoformat(),
+            "pid": ev.pid,
+            "process_name": ev.process_name,
+            "remote_ip": ev.remote_ip,
+            "remote_port": ev.remote_port,
+            "local_port": ev.local_port,
+            "tenant_id": tenant_id,
+            "meta": ev.meta,
+        }
+        buffer_telemetry(entry)
+
+        # Threat Intel cross-reference for network connections
+        if ev.remote_ip:
+            match = check_threat_intel(ev.remote_ip)
+            if match:
+                threat_matches.append({"ip": ev.remote_ip, **match, "agent_id": ev.agent_id})
+                log_action(tenant_id, None, "threat_intel.agent_match", f"agents/{ev.agent_id}", {
+                    "ip": ev.remote_ip, "source": match.get("source"),
+                    "category": match.get("category"), "hostname": ev.hostname,
+                })
+        processed += 1
+
+    if threat_matches:
+        await broadcast(tenant_id, {
+            "kind": "threat_intel_alert",
+            "matches": threat_matches[:10],
+            "count": len(threat_matches),
+        })
+
+    return {
+        "processed": processed,
+        "threat_matches": len(threat_matches),
+        "agents_active": len(_REGISTERED_AGENTS),
+    }
+
+
+@app.get("/agents/status")
+def get_agent_status(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get status of all registered distributed agents."""
+    agents = []
+    for agent_id, info in _REGISTERED_AGENTS.items():
+        last_seen = info.get("last_seen", "")
+        agents.append({
+            "agent_id": agent_id,
+            "hostname": info.get("hostname"),
+            "last_seen": last_seen,
+            "status": info.get("status", "unknown"),
+            "event_count": info.get("event_count", 0),
+        })
+    return {"agents": agents, "total": len(agents)}
+
+
+@app.get("/telemetry/recent")
+def get_recent_telemetry(
+    limit: int = 50,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get recent telemetry events from distributed agents."""
+    safe_limit = max(1, min(limit, 200))
+    filtered = [e for e in reversed(_TELEMETRY_BUFFER) if e.get("tenant_id") == tenant_id][:safe_limit]
+    return {"events": filtered, "total_buffered": len(_TELEMETRY_BUFFER)}
+
+
+# ---------------------------------------------------------------------------
+# Threat Intelligence Service (The Oracle)
+# ---------------------------------------------------------------------------
+
+@app.get("/threat-intel/feed")
+def get_threat_intel_feed(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get current global threat intelligence feed."""
+    feed = poll_threat_intel_feed()
+    indicators = []
+    for ip, info in feed.items():
+        indicators.append({
+            "ip": ip,
+            "source": info.get("source"),
+            "category": info.get("category"),
+            "risk": info.get("risk"),
+            "tags": info.get("tags", []),
+        })
+    return {"indicators": indicators, "total": len(indicators), "feed_sources": ["AlienVault OTX", "abuse.ch", "ThreatFox"]}
+
+
+@app.post("/threat-intel/check")
+def check_threat_intel_endpoint(
+    ip: str,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Check if a specific IP is in the threat intelligence feed."""
+    match = check_threat_intel(ip)
+    if match:
+        return {"ip": ip, "matched": True, **match}
+    return {"ip": ip, "matched": False}
+
+
+# ---------------------------------------------------------------------------
+# Simulation Engine — Security Drills (The Architect)
+# ---------------------------------------------------------------------------
+
+async def _execute_security_drill(
+    tenant_id: str,
+    drill_type: str,
+    user: dict,
+    target_user: str | None = None,
+    iterations: int = 5,
+) -> dict:
+    """Run a non-destructive security drill and validate system responses."""
+    drill_id = f"drill_{now_utc().strftime('%Y%m%d_%H%M%S')}_{drill_type}"
+    target = target_user or "drill.simulated.user"
+    results: dict = {
+        "drill_id": drill_id,
+        "drill_type": drill_type,
+        "target_user": target,
+        "iterations": iterations,
+        "started_at": now_utc().isoformat(),
+        "checks": {},
+    }
+
+    if drill_type == "brute_force":
+        # Simulate brute-force login attempts → should trigger JIT revocation
+        for i in range(iterations):
+            log_action(tenant_id, None, "drill.brute_force_attempt", f"users/{target}", {
+                "attempt": i + 1, "ip": f"198.51.100.{i + 10}", "drill_id": drill_id,
+            })
+        # Check: did JIT revocation engage?
+        jit_engaged = is_jit_revoked(tenant_id, target)
+        results["checks"]["jit_revocation"] = "pass" if jit_engaged else "not_triggered"
+        # Check: is ghost mode available?
+        policy = _get_or_create_soar_policy(tenant_id)
+        results["checks"]["ghost_mode_available"] = "pass" if policy.get("ghost_mode") else "disabled"
+        results["checks"]["auto_response_enabled"] = "pass" if policy.get("auto_response_enabled") else "disabled"
+
+    elif drill_type == "phishing_sim":
+        # Simulate phishing event ingest
+        log_action(tenant_id, None, "drill.phishing_sim", f"users/{target}", {"drill_id": drill_id})
+        policy = _get_or_create_soar_policy(tenant_id)
+        pb = (policy.get("playbooks") or {}).get("phishing", {})
+        results["checks"]["phishing_playbook_enabled"] = "pass" if pb.get("enabled") else "disabled"
+        results["checks"]["deception_enabled"] = "pass" if pb.get("deception_enabled") else "disabled"
+
+    elif drill_type == "ghost_mode_test":
+        policy = _get_or_create_soar_policy(tenant_id)
+        results["checks"]["ghost_mode_enabled"] = "pass" if policy.get("ghost_mode") else "disabled"
+        for pb_name, pb_conf in (policy.get("playbooks") or {}).items():
+            results["checks"][f"deception_{pb_name}"] = "pass" if pb_conf.get("deception_enabled") else "disabled"
+
+    elif drill_type == "jit_test":
+        # Temporarily revoke and reinstate to verify JIT pipeline
+        jit_revoke_user_sessions(tenant_id, target, reason=f"drill_{drill_id}")
+        results["checks"]["jit_revoke"] = "pass" if is_jit_revoked(tenant_id, target) else "fail"
+        jit_reinstate_user(tenant_id, target)
+        results["checks"]["jit_reinstate"] = "pass" if not is_jit_revoked(tenant_id, target) else "fail"
+
+    else:
+        results["checks"]["unknown_drill_type"] = "fail"
+
+    # Score the drill
+    checks = results["checks"]
+    total_checks = len(checks)
+    passed = sum(1 for v in checks.values() if v == "pass")
+    results["completed_at"] = now_utc().isoformat()
+    results["score"] = f"{passed}/{total_checks}"
+    results["success_rate"] = round(passed / total_checks * 100, 1) if total_checks else 0.0
+    results["overall"] = "pass" if passed == total_checks else "partial" if passed > 0 else "fail"
+
+    record_drill(results)
+    log_action(tenant_id, user.get("id"), "drill.completed", f"drills/{drill_id}", {
+        "drill_type": drill_type, "score": results["score"], "overall": results["overall"],
+    })
+    await broadcast(tenant_id, {"kind": "drill_completed", "drill_id": drill_id, "overall": results["overall"], "score": results["score"]})
+
+    return results
+
+
+@app.post("/drills/run")
+async def run_security_drill(
+    body: DrillRequest,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Run a non-destructive security drill to validate system responses."""
+    valid_drills = {"brute_force", "phishing_sim", "ghost_mode_test", "jit_test"}
+    if body.drill_type not in valid_drills:
+        raise HTTPException(status_code=400, detail=f"Invalid drill type. Valid: {', '.join(sorted(valid_drills))}")
+    result = await _execute_security_drill(tenant_id, body.drill_type, user, body.target_user, body.iterations)
+    return result
+
+
+@app.get("/drills/history")
+def get_drill_history(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Get history of security drill runs."""
+    return {"drills": list(reversed(_DRILL_HISTORY)), "total": len(_DRILL_HISTORY)}
 
 
 @app.put("/incidents/{incident_id}/status")
@@ -3720,6 +4059,32 @@ def get_incident_timeline(
                 "playbook": playbook,
                 "status": status,
                 "risk_score": risk,
+                "actor": r.get("user_id") or "system",
+            })
+        elif action.startswith("threat_intel."):
+            ip = meta.get("ip") or "unknown"
+            source = meta.get("source") or "unknown"
+            cat = meta.get("category") or "unknown"
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "threat_intel",
+                "description": f"Threat Intel match: {ip} ({cat}) via {source}",
+                "ip": ip,
+                "threat_source": source,
+                "threat_category": cat,
+                "actor": "system",
+            })
+        elif action.startswith("drill."):
+            drill_id = meta.get("drill_id") or ""
+            timeline.append({
+                "timestamp": ts_iso,
+                "action": action,
+                "category": "drill",
+                "description": meta.get("description") or f"Security drill: {action.replace('drill.', '')}",
+                "drill_id": drill_id,
+                "score": meta.get("score"),
+                "overall": meta.get("overall"),
                 "actor": r.get("user_id") or "system",
             })
         else:

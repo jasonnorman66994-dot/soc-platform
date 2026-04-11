@@ -5,6 +5,9 @@ export default function AuditDashboard() {
   const [stats, setStats] = useState(null);
   const [audit, setAudit] = useState(null);
   const [jitStatus, setJitStatus] = useState(null);
+  const [threatFeed, setThreatFeed] = useState(null);
+  const [agents, setAgents] = useState(null);
+  const [drills, setDrills] = useState(null);
   const [loading, setLoading] = useState(true);
   const [windowDays, setWindowDays] = useState(30);
 
@@ -20,14 +23,20 @@ export default function AuditDashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [statsRes, auditRes, jitRes] = await Promise.all([
+      const [statsRes, auditRes, jitRes, threatRes, agentsRes, drillsRes] = await Promise.all([
         fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/soar/stats?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/soar/audit?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/jit/status`, { headers: headers() }),
+        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/threat-intel/feed`, { headers: headers() }),
+        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/agents/status`, { headers: headers() }),
+        fetch(`${process.env.NEXT_PUBLIC_API || "http://localhost:8000"}/drills/history`, { headers: headers() }),
       ]);
       if (statsRes.ok) setStats(await statsRes.json());
       if (auditRes.ok) setAudit(await auditRes.json());
       if (jitRes.ok) setJitStatus(await jitRes.json());
+      if (threatRes.ok) setThreatFeed(await threatRes.json());
+      if (agentsRes.ok) setAgents(await agentsRes.json());
+      if (drillsRes.ok) setDrills(await drillsRes.json());
     } catch (e) {
       console.error("AuditDashboard load error:", e);
     } finally {
@@ -158,6 +167,169 @@ export default function AuditDashboard() {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* Global Threat Map */}
+      {threatFeed && threatFeed.indicators && (
+        <div style={card}>
+          <h2 style={h2}>Global Threat Intel Map</h2>
+          <p style={{ color: "#888", fontSize: 12, marginBottom: 12 }}>Sources: {(threatFeed.feed_sources || []).join(", ")}</p>
+          <div style={{ position: "relative", background: "#151528", borderRadius: 8, padding: 20, minHeight: 200, overflow: "hidden" }}>
+            {/* Stylized world map outline */}
+            <svg viewBox="0 0 800 400" style={{ width: "100%", height: "auto", opacity: 0.2 }}>
+              <ellipse cx="400" cy="200" rx="380" ry="180" fill="none" stroke="#5b5fc7" strokeWidth="1" />
+              <line x1="20" y1="200" x2="780" y2="200" stroke="#5b5fc7" strokeWidth="0.5" />
+              <line x1="400" y1="20" x2="400" y2="380" stroke="#5b5fc7" strokeWidth="0.5" />
+              <ellipse cx="400" cy="200" rx="380" ry="60" fill="none" stroke="#5b5fc7" strokeWidth="0.5" />
+              <ellipse cx="400" cy="200" rx="380" ry="120" fill="none" stroke="#5b5fc7" strokeWidth="0.5" />
+            </svg>
+            {/* Threat indicators plotted as pulsing dots */}
+            {threatFeed.indicators.map((ind, i) => {
+              const hash = [...ind.ip].reduce((a, c) => a + c.charCodeAt(0), 0);
+              const x = 10 + (hash * 7) % 80;
+              const y = 10 + (hash * 13) % 80;
+              const riskColor = ind.risk >= 90 ? "#f44" : ind.risk >= 70 ? "#f90" : "#fa0";
+              return (
+                <div key={i} title={`${ind.ip} — ${ind.category} (risk: ${ind.risk})`}
+                  style={{
+                    position: "absolute", left: `${x}%`, top: `${y}%`,
+                    width: 12, height: 12, borderRadius: "50%",
+                    background: riskColor, opacity: 0.85,
+                    boxShadow: `0 0 8px ${riskColor}`,
+                    animation: "pulse 2s infinite",
+                    cursor: "pointer",
+                  }} />
+              );
+            })}
+          </div>
+          <style>{`@keyframes pulse { 0%,100% { transform: scale(1); opacity: 0.85; } 50% { transform: scale(1.4); opacity: 0.5; } }`}</style>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #444" }}>
+                <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>IP</th>
+                <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Category</th>
+                <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Source</th>
+                <th style={{ textAlign: "right", padding: 8, color: "#aaa" }}>Risk</th>
+                <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              {threatFeed.indicators.map((ind, i) => (
+                <tr key={i} style={{ borderBottom: "1px solid #2a2a3a" }}>
+                  <td style={{ padding: 8, color: "#faa", fontFamily: "monospace" }}>{ind.ip}</td>
+                  <td style={{ padding: 8, color: "#ddf" }}>{ind.category}</td>
+                  <td style={{ padding: 8, color: "#aac" }}>{ind.source}</td>
+                  <td style={{ padding: 8, textAlign: "right", color: ind.risk >= 90 ? "#f44" : ind.risk >= 70 ? "#f90" : "#fa0", fontWeight: 700 }}>{ind.risk}</td>
+                  <td style={{ padding: 8, color: "#888" }}>{(ind.tags || []).join(", ")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* System Health — Distributed Agents */}
+      {agents && (
+        <div style={card}>
+          <h2 style={h2}>System Health — Distributed Agents</h2>
+          {agents.total === 0
+            ? <p style={{ color: "#888" }}>No agents registered yet. Deploy agents/soc_agent.py to begin telemetry collection.</p>
+            : (
+              <>
+                <div style={row}>
+                  <div style={kpi}>
+                    <div style={label}>Active Agents</div>
+                    <div style={{ ...value, color: "#6f6" }}>{agents.total}</div>
+                  </div>
+                  <div style={kpi}>
+                    <div style={label}>Total Events</div>
+                    <div style={value}>{agents.agents.reduce((s, a) => s + (a.event_count || 0), 0)}</div>
+                  </div>
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #444" }}>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Agent ID</th>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Hostname</th>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Status</th>
+                      <th style={{ textAlign: "right", padding: 8, color: "#aaa" }}>Events</th>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Last Seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {agents.agents.map(a => (
+                      <tr key={a.agent_id} style={{ borderBottom: "1px solid #2a2a3a" }}>
+                        <td style={{ padding: 8, color: "#ddf", fontFamily: "monospace" }}>{a.agent_id}</td>
+                        <td style={{ padding: 8, color: "#ccc" }}>{a.hostname || "—"}</td>
+                        <td style={{ padding: 8, color: a.status === "active" ? "#6f6" : "#f90" }}>{a.status}</td>
+                        <td style={{ padding: 8, textAlign: "right", color: "#fff" }}>{a.event_count}</td>
+                        <td style={{ padding: 8, color: "#888", fontSize: 12 }}>{a.last_seen || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+        </div>
+      )}
+
+      {/* Drill Success — Security Validation */}
+      {drills && (
+        <div style={card}>
+          <h2 style={h2}>Security Drill Results</h2>
+          {drills.total === 0
+            ? <p style={{ color: "#888" }}>No drills executed yet. Run via Voice Command or POST /drills/run.</p>
+            : (
+              <>
+                <div style={row}>
+                  <div style={kpi}>
+                    <div style={label}>Total Drills</div>
+                    <div style={value}>{drills.total}</div>
+                  </div>
+                  <div style={kpi}>
+                    <div style={label}>Passed</div>
+                    <div style={{ ...value, color: "#6f6" }}>{drills.drills.filter(d => d.overall === "pass").length}</div>
+                  </div>
+                  <div style={kpi}>
+                    <div style={label}>Partial</div>
+                    <div style={{ ...value, color: "#f90" }}>{drills.drills.filter(d => d.overall === "partial").length}</div>
+                  </div>
+                  <div style={kpi}>
+                    <div style={label}>Failed</div>
+                    <div style={{ ...value, color: "#f44" }}>{drills.drills.filter(d => d.overall === "fail").length}</div>
+                  </div>
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #444" }}>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Drill ID</th>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Type</th>
+                      <th style={{ textAlign: "center", padding: 8, color: "#aaa" }}>Score</th>
+                      <th style={{ textAlign: "center", padding: 8, color: "#aaa" }}>Overall</th>
+                      <th style={{ textAlign: "left", padding: 8, color: "#aaa" }}>Completed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drills.drills.map(d => (
+                      <tr key={d.drill_id} style={{ borderBottom: "1px solid #2a2a3a" }}>
+                        <td style={{ padding: 8, color: "#ddf", fontFamily: "monospace", fontSize: 12 }}>{d.drill_id}</td>
+                        <td style={{ padding: 8, color: "#ccc" }}>{d.drill_type}</td>
+                        <td style={{ padding: 8, textAlign: "center", color: "#fff", fontWeight: 600 }}>{d.score}</td>
+                        <td style={{ padding: 8, textAlign: "center" }}>
+                          <span style={{
+                            background: d.overall === "pass" ? "#1a4a1a" : d.overall === "partial" ? "#4a3a0a" : "#4a1a1a",
+                            color: d.overall === "pass" ? "#6f6" : d.overall === "partial" ? "#f90" : "#f44",
+                            padding: "2px 10px", borderRadius: 12, fontSize: 12, fontWeight: 600,
+                          }}>{d.overall}</span>
+                        </td>
+                        <td style={{ padding: 8, color: "#888", fontSize: 12 }}>{d.completed_at || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
         </div>
       )}
     </main>
