@@ -919,34 +919,53 @@ async def security_middleware(request: Request, call_next):
 _scheduler: "BackgroundScheduler | None" = None
 
 
-def _fire_due_schedules() -> None:
-    """Query enabled schedules whose next_run is past and execute each one."""
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id FROM report_schedules
-                    WHERE enabled = TRUE
-                      AND next_run IS NOT NULL
-                      AND next_run <= NOW()
-                    ORDER BY next_run ASC
-                    """
-                )
-                due_ids = [row["id"] for row in cur.fetchall()]
-    except Exception as exc:  # noqa: BLE001
-        print(f"[scheduler] error querying due schedules: {exc}", flush=True)
-        return
+def execute_due_report_schedules() -> dict:
+    """Execute all currently due and enabled report schedules, returning a summary."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM report_schedules
+                WHERE enabled = TRUE
+                  AND next_run IS NOT NULL
+                  AND next_run <= NOW()
+                ORDER BY next_run ASC
+                """
+            )
+            due_ids = [row["id"] for row in cur.fetchall()]
 
+    executed_ids = []
+    failures = []
     for schedule_id in due_ids:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     run_report_schedule_export(cur, schedule_id)
                     conn.commit()
-            print(f"[scheduler] executed schedule {schedule_id}", flush=True)
+            executed_ids.append(schedule_id)
         except Exception as exc:  # noqa: BLE001
-            print(f"[scheduler] error running schedule {schedule_id}: {exc}", flush=True)
+            failures.append({"schedule_id": schedule_id, "error": str(exc)})
+
+    return {
+        "found": len(due_ids),
+        "executed_count": len(executed_ids),
+        "failed_count": len(failures),
+        "executed_schedule_ids": executed_ids,
+        "failures": failures,
+    }
+
+
+def _fire_due_schedules() -> None:
+    """Query enabled schedules whose next_run is past and execute each one."""
+    try:
+        summary = execute_due_report_schedules()
+        if summary["executed_count"] or summary["failed_count"]:
+            print(
+                f"[scheduler] due run summary found={summary['found']} executed={summary['executed_count']} failed={summary['failed_count']}",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[scheduler] error running due schedules: {exc}", flush=True)
 
 
 @app.on_event("startup")
@@ -1902,6 +1921,12 @@ def list_due_report_schedules_ordered(_admin=Depends(require_internal_admin_toke
                 """
             )
             return cur.fetchall()
+
+
+@app.post("/admin/reports/schedules/run-due")
+def run_due_report_schedules(_admin=Depends(require_internal_admin_token)):
+    """Execute all currently due schedules immediately and return execution summary."""
+    return execute_due_report_schedules()
 
 
 @app.get("/admin/reports/schedules/{schedule_id}")

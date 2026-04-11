@@ -19,6 +19,8 @@
 - Background auto-executor: the backend now runs a 1-minute APScheduler job that fires all enabled schedules whose `next_run <= NOW()` automatically.
 - New endpoint `GET /api/admin/reports/schedules/due` lists all currently overdue enabled schedules for operational visibility.
 - Command Center now supports schedule editing: load a schedule into the form, update via `PATCH /api/admin/reports/schedules/{id}`, or cancel edit.
+- New endpoint `POST /api/admin/reports/schedules/run-due` executes all currently due schedules immediately and returns execution summary counts.
+- Command Center adds a `Run Due Now` control to trigger due-schedule execution on demand and display summary results.
 
 ### Changed
 
