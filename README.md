@@ -224,6 +224,7 @@ Admin-only endpoints for managing automated board report export schedules:
 - **List schedules**: `GET /api/admin/reports/schedules` — Returns array of all configured export schedules.
 - **Get schedule**: `GET /api/admin/reports/schedules/{id}` — Returns single schedule by ID.
 - **Update schedule**: `PATCH /api/admin/reports/schedules/{id}` — Partial update of schedule fields.
+- **Run schedule now**: `POST /api/admin/reports/schedules/{id}/run` — Executes the configured export immediately, updates `last_run`/`next_run`, and returns the generated report payload.
 - **Delete schedule**: `DELETE /api/admin/reports/schedules/{id}` — Removes schedule.
 
 Schedule validation rules:
@@ -239,7 +240,7 @@ Command Center support:
 - **Admin Operations Panel** now includes Board Report Export Schedule section.
 - Input fields for schedule name, frequency, day-of-week or day-of-month, hour, report format, and immediate CRUD controls.
 - `Load Board Report` and `Download Board Report` use parameter inputs and clamp to safe ranges.
-- Active schedules listed with delete buttons and computed next-run visibility.
+- Active schedules listed with run-now and delete controls plus computed next-run visibility.
 
 ## Founder Assets
 
