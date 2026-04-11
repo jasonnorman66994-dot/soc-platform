@@ -143,6 +143,52 @@ class DemoResetBody(BaseModel):
     regenerate_api_key: bool = False
 
 
+class ReportScheduleCreate(BaseModel):
+    name: str
+    description: str | None = None
+    format: str = "markdown"  # markdown or json
+    frequency: str = "weekly"  # daily, weekly, monthly
+    day_of_week: int | None = None  # 0=Monday, 6=Sunday (for weekly)
+    hour_of_day: int = 9
+    window_days: int = 30
+    incident_limit: int = 10
+    recipients: str | None = None
+    enabled: bool = True
+
+
+class ReportScheduleUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    format: str | None = None
+    frequency: str | None = None
+    day_of_week: int | None = None
+    hour_of_day: int | None = None
+    window_days: int | None = None
+    incident_limit: int | None = None
+    recipients: str | None = None
+    enabled: bool | None = None
+
+
+class ReportScheduleResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    format: str
+    frequency: str
+    day_of_week: int | None
+    hour_of_day: int
+    window_days: int
+    incident_limit: int
+    recipients: str | None
+    enabled: bool
+    last_run: datetime | None
+    next_run: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -316,6 +362,24 @@ def init_db():
                     reason TEXT,
                     fingerprint TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS report_schedules (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    format TEXT NOT NULL DEFAULT 'markdown',
+                    frequency TEXT NOT NULL DEFAULT 'weekly',
+                    day_of_week INTEGER,
+                    hour_of_day INTEGER DEFAULT 9,
+                    window_days INTEGER DEFAULT 30,
+                    incident_limit INTEGER DEFAULT 10,
+                    recipients TEXT,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    last_run TIMESTAMPTZ,
+                    next_run TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
                 ALTER TABLE lead_captures ADD COLUMN IF NOT EXISTS tenant_id TEXT;
@@ -1557,6 +1621,148 @@ def get_board_report_markdown(window_days: int = 30, incident_limit: int = 10, _
         media_type="text/markdown",
         headers={"Content-Disposition": 'attachment; filename="board-report.md"'},
     )
+
+
+@app.post("/admin/reports/schedules")
+def create_report_schedule(body: ReportScheduleCreate, _admin=Depends(require_internal_admin_token)):
+    """Create a new board report export schedule."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO report_schedules 
+                (name, description, format, frequency, day_of_week, hour_of_day, 
+                 window_days, incident_limit, recipients, enabled, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                RETURNING id, name, description, format, frequency, day_of_week, hour_of_day,
+                          window_days, incident_limit, recipients, enabled, last_run, next_run, 
+                          created_at, updated_at
+                """,
+                (
+                    body.name,
+                    body.description,
+                    body.format,
+                    body.frequency,
+                    body.day_of_week,
+                    body.hour_of_day,
+                    body.window_days,
+                    body.incident_limit,
+                    body.recipients,
+                    body.enabled,
+                ),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return ReportScheduleResponse(**row)
+
+
+@app.get("/admin/reports/schedules")
+def list_report_schedules(_admin=Depends(require_internal_admin_token)):
+    """List all board report export schedules."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, description, format, frequency, day_of_week, hour_of_day,
+                       window_days, incident_limit, recipients, enabled, last_run, next_run,
+                       created_at, updated_at
+                FROM report_schedules
+                ORDER BY created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+            return [ReportScheduleResponse(**row) for row in rows]
+
+
+@app.get("/admin/reports/schedules/{schedule_id}")
+def get_report_schedule(schedule_id: int, _admin=Depends(require_internal_admin_token)):
+    """Get a specific board report export schedule."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, description, format, frequency, day_of_week, hour_of_day,
+                       window_days, incident_limit, recipients, enabled, last_run, next_run,
+                       created_at, updated_at
+                FROM report_schedules
+                WHERE id = %s
+                """,
+                (schedule_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+            return ReportScheduleResponse(**row)
+
+
+@app.patch("/admin/reports/schedules/{schedule_id}")
+def update_report_schedule(
+    schedule_id: int,
+    body: ReportScheduleUpdate,
+    _admin=Depends(require_internal_admin_token),
+):
+    """Update a board report export schedule."""
+    updates = {}
+    if body.name is not None:
+        updates["name"] = body.name
+    if body.description is not None:
+        updates["description"] = body.description
+    if body.format is not None:
+        updates["format"] = body.format
+    if body.frequency is not None:
+        updates["frequency"] = body.frequency
+    if body.day_of_week is not None:
+        updates["day_of_week"] = body.day_of_week
+    if body.hour_of_day is not None:
+        updates["hour_of_day"] = body.hour_of_day
+    if body.window_days is not None:
+        updates["window_days"] = body.window_days
+    if body.incident_limit is not None:
+        updates["incident_limit"] = body.incident_limit
+    if body.recipients is not None:
+        updates["recipients"] = body.recipients
+    if body.enabled is not None:
+        updates["enabled"] = body.enabled
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    updates["updated_at"] = "NOW()"
+    set_clause = ", ".join([f"{k} = %s" for k in updates.keys() if k != "updated_at"])
+    set_clause += ", updated_at = NOW()"
+    values = [v for k, v in updates.items() if k != "updated_at"]
+    values.append(schedule_id)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE report_schedules
+                SET {set_clause}
+                WHERE id = %s
+                RETURNING id, name, description, format, frequency, day_of_week, hour_of_day,
+                          window_days, incident_limit, recipients, enabled, last_run, next_run,
+                          created_at, updated_at
+                """,
+                values,
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+            conn.commit()
+            return ReportScheduleResponse(**row)
+
+
+@app.delete("/admin/reports/schedules/{schedule_id}")
+def delete_report_schedule(schedule_id: int, _admin=Depends(require_internal_admin_token)):
+    """Delete a board report export schedule."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM report_schedules WHERE id = %s", (schedule_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+            conn.commit()
+            return {"success": True, "message": f"Schedule {schedule_id} deleted"}
 
 
 @app.get("/admin/leads")

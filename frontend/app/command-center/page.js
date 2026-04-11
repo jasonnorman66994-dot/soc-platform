@@ -30,6 +30,19 @@ export default function CommandCenterPage() {
   const [adminBoardReport, setAdminBoardReport] = useState(null);
   const [boardWindowDays, setBoardWindowDays] = useState("30");
   const [boardIncidentLimit, setBoardIncidentLimit] = useState("10");
+  const [reportSchedules, setReportSchedules] = useState([]);
+  const [scheduleForm, setScheduleForm] = useState({
+    name: "Weekly Board Report",
+    description: "Automated weekly board report export",
+    format: "markdown",
+    frequency: "weekly",
+    day_of_week: 1,
+    hour_of_day: 9,
+    window_days: 30,
+    incident_limit: 10,
+    recipients: "",
+    enabled: true,
+  });
 
   const authHeaders = useMemo(
     () => ({
@@ -307,6 +320,67 @@ export default function CommandCenterPage() {
     setAdminError("");
   }
 
+  async function loadReportSchedules() {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/schedules`, {
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to load schedules");
+      return;
+    }
+    setReportSchedules(data || []);
+    setAdminError("");
+  }
+
+  async function createReportSchedule() {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/schedules`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminAccessToken}`,
+      },
+      body: JSON.stringify(scheduleForm),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to create schedule");
+      return;
+    }
+    setAdminError("");
+    await loadReportSchedules();
+    setScheduleForm({
+      name: "Weekly Board Report",
+      description: "Automated weekly board report export",
+      format: "markdown",
+      frequency: "weekly",
+      day_of_week: 1,
+      hour_of_day: 9,
+      window_days: 30,
+      incident_limit: 10,
+      recipients: "",
+      enabled: true,
+    });
+  }
+
+  async function deleteReportSchedule(scheduleId) {
+    if (!adminAccessToken) return;
+    if (!confirm("Delete this schedule?")) return;
+    const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to delete schedule");
+      return;
+    }
+    setAdminError("");
+    await loadReportSchedules();
+  }
+
   return (
     <main style={{ minHeight: "100vh", padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -428,6 +502,39 @@ export default function CommandCenterPage() {
               </li>
             ))}
           </ul>
+        </div>
+
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #1e293b" }}>
+          <h4 style={{ margin: 0, marginBottom: 8, color: "#cbd5e1" }}>Report Export Schedule</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 6 }}>
+            <input style={input} type="text" placeholder="Schedule name" value={scheduleForm.name} onChange={(e) => setScheduleForm({ ...scheduleForm, name: e.target.value })} />
+            <select style={input} value={scheduleForm.frequency} onChange={(e) => setScheduleForm({ ...scheduleForm, frequency: e.target.value })}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            <input style={input} type="number" min="0" max="6" placeholder="Day (0=Mon, 6=Sun)" value={scheduleForm.day_of_week} onChange={(e) => setScheduleForm({ ...scheduleForm, day_of_week: Number.parseInt(e.target.value) })} />
+            <input style={input} type="number" min="0" max="23" placeholder="Hour (0-23)" value={scheduleForm.hour_of_day} onChange={(e) => setScheduleForm({ ...scheduleForm, hour_of_day: Number.parseInt(e.target.value) })} />
+            <select style={input} value={scheduleForm.format} onChange={(e) => setScheduleForm({ ...scheduleForm, format: e.target.value })}>
+              <option value="markdown">Markdown</option>
+              <option value="json">JSON</option>
+            </select>
+            <button style={btn} onClick={loadReportSchedules}>Load Schedules</button>
+            <button style={btn} onClick={createReportSchedule}>Create Schedule</button>
+          </div>
+          {reportSchedules.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <h5 style={{ margin: 0, marginBottom: 6, color: "#94a3b8" }}>Active Schedules:</h5>
+              <ul style={list}>
+                {reportSchedules.map((s) => (
+                  <li key={s.id} style={{ ...row, cursor: "pointer", paddingRight: 6, alignItems: "center", justifyContent: "space-between" }}>
+                    <span>{s.name} ({s.frequency} @ {s.hour_of_day}:00)</span>
+                    <button style={{ ...btn, background: "#dc2626", padding: "4px 8px", fontSize: "12px" }} onClick={() => deleteReportSchedule(s.id)}>Delete</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       </section>
 

@@ -216,10 +216,22 @@ Board report query parameters:
 - `window_days`: rolling lookback window for incident/webhook metrics (default `30`)
 - `incident_limit`: number of recent incidents to include (default `10`)
 
+### Board Report Export Scheduling
+
+Admin-only endpoints for managing automated board report export schedules:
+
+- **Create schedule**: `POST /api/admin/reports/schedules` — Accepts `name`, `description`, `format` (markdown/json), `frequency` (daily/weekly/monthly), `day_of_week`, `hour_of_day`, `window_days`, `incident_limit`, `recipients`, `enabled`.
+- **List schedules**: `GET /api/admin/reports/schedules` — Returns array of all configured export schedules.
+- **Get schedule**: `GET /api/admin/reports/schedules/{id}` — Returns single schedule by ID.
+- **Update schedule**: `PATCH /api/admin/reports/schedules/{id}` — Partial update of schedule fields.
+- **Delete schedule**: `DELETE /api/admin/reports/schedules/{id}` — Removes schedule.
+
 Command Center support:
 
-- Admin Operations Panel now includes `Board window days` and `Incident limit` inputs.
-- `Load Board Report` and `Download Board Report` use these values and clamp to safe ranges.
+- **Admin Operations Panel** now includes Board Report Export Schedule section.
+- Input fields for schedule name, frequency, day-of-week, hour, report format, and immediate CRUD controls.
+- `Load Board Report` and `Download Board Report` use parameter inputs and clamp to safe ranges.
+- Active schedules listed with delete buttons for one-click management.
 
 ## Founder Assets
 
