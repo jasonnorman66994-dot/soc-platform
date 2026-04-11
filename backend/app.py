@@ -131,6 +131,21 @@ def _event_story_severity(event_type: str) -> str:
     return "low"
 
 
+def _severity_rank(level: str | None) -> int:
+    mapping = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    return mapping.get((level or "").lower(), 1)
+
+
+def _max_severity(current: str | None, incoming: str | None) -> str:
+    return current if _severity_rank(current) >= _severity_rank(incoming) else (incoming or current or "low")
+
+
+def _calculate_risk_score(critical_alerts: int, high_alerts: int, total_alerts: int) -> int:
+    medium_or_lower = max(total_alerts - critical_alerts - high_alerts, 0)
+    score = (critical_alerts * 50) + (high_alerts * 30) + (medium_or_lower * 10)
+    return min(score, 100)
+
+
 def render_executive_story_markdown(report: dict) -> str:
     summary = report["summary"]
     timeline = report["timeline"]
@@ -147,6 +162,7 @@ def render_executive_story_markdown(report: dict) -> str:
         f"- Events analyzed: {summary['total_events']}",
         f"- Alerts in window: {summary['total_alerts']}",
         f"- Critical alerts: {summary['critical_alerts']}",
+        f"- Risk score: {summary['risk_score']} / 100",
         f"- Open incidents: {summary['open_incidents']}",
         "",
         "## Key Findings",
@@ -266,6 +282,7 @@ def build_executive_attack_story_report(tenant_id: str, window_minutes: int = 18
     critical_alerts = int(alert_summary.get("critical_alerts") or 0)
     high_alerts = int(alert_summary.get("high_alerts") or 0)
     open_incidents = int(incident_summary.get("open_incidents") or 0)
+    risk_score = _calculate_risk_score(critical_alerts, high_alerts, total_alerts)
 
     findings = [
         f"{critical_alerts} critical alerts and {high_alerts} high alerts were detected in the selected window.",
@@ -284,6 +301,7 @@ def build_executive_attack_story_report(tenant_id: str, window_minutes: int = 18
             "total_alerts": total_alerts,
             "critical_alerts": critical_alerts,
             "high_alerts": high_alerts,
+            "risk_score": risk_score,
             "open_incidents": open_incidents,
             "top_event_types": top_event_types,
             "top_users": top_users,
@@ -2014,7 +2032,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                 alert_rows.append(cur.fetchone())
 
             cur.execute(
-                "SELECT id, user_id, type, timestamp FROM events WHERE tenant_id=%s ORDER BY id DESC LIMIT 30",
+                "SELECT id, user_id, type, raw, timestamp FROM events WHERE tenant_id=%s ORDER BY id DESC LIMIT 30",
                 (tenant_id,),
             )
             recent_events = [
@@ -2022,6 +2040,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                     "id": e["id"],
                     "user_id": e["user_id"],
                     "event_type": e["type"],
+                    "ip": ((e.get("raw") or {}).get("ip") if isinstance(e.get("raw"), dict) else None),
                     "timestamp": e["timestamp"].isoformat(),
                 }
                 for e in cur.fetchall()
@@ -2030,15 +2049,66 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
             incident = correlate(recent_events, alerts)
             incident_row = None
             if incident:
+                entity = incident.get("entity") or "unknown"
+                incoming_story = incident.get("story") or {}
+
                 cur.execute(
                     """
-                    INSERT INTO incidents (tenant_id, entity, severity, status, story, assigned_to)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                    SELECT id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                    FROM incidents
+                    WHERE tenant_id=%s
+                      AND entity=%s
+                      AND status <> 'resolved'
+                      AND last_seen >= NOW() - INTERVAL '30 minutes'
+                    ORDER BY id DESC
+                    LIMIT 1
                     """,
-                    (tenant_id, incident["entity"], incident["severity"], incident["status"], json.dumps(incident["story"]), None),
+                    (tenant_id, entity),
                 )
-                incident_row = cur.fetchone()
+                existing_incident = cur.fetchone()
+
+                if existing_incident:
+                    existing_story = existing_incident.get("story")
+                    if isinstance(existing_story, str):
+                        try:
+                            existing_story = json.loads(existing_story)
+                        except Exception:  # noqa: BLE001
+                            existing_story = {}
+                    existing_story = existing_story if isinstance(existing_story, dict) else {}
+
+                    merged_users = list({*(existing_story.get("users") or []), *(incoming_story.get("users") or [])})
+                    merged_ips = list({*(existing_story.get("ips") or []), *(incoming_story.get("ips") or [])})
+                    merged_stages = [*(existing_story.get("stages") or []), *(incoming_story.get("stages") or [])][-12:]
+                    merged_story = {
+                        "users": merged_users,
+                        "ips": merged_ips,
+                        "stages": merged_stages,
+                    }
+                    merged_severity = _max_severity(existing_incident.get("severity"), incident.get("severity"))
+
+                    cur.execute(
+                        """
+                        UPDATE incidents
+                        SET severity=%s,
+                            story=%s,
+                            status='open',
+                            last_seen=NOW()
+                        WHERE id=%s
+                        RETURNING id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                        """,
+                        (merged_severity, json.dumps(merged_story), existing_incident["id"]),
+                    )
+                    incident_row = cur.fetchone()
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO incidents (tenant_id, entity, severity, status, story, assigned_to)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                        """,
+                        (tenant_id, entity, incident["severity"], incident["status"], json.dumps(incoming_story), None),
+                    )
+                    incident_row = cur.fetchone()
 
         conn.commit()
 

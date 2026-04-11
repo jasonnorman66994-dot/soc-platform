@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import Timeline from "../../components/Timeline";
+import { replayTimeline } from "../../lib/timelineReplay";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
 const WS = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost/ws";
@@ -75,6 +77,8 @@ export default function CommandCenterPage() {
   const [storyWindowMinutes, setStoryWindowMinutes] = useState("180");
   const [storyLoading, setStoryLoading] = useState(false);
   const [storyError, setStoryError] = useState("");
+  const [replayIndex, setReplayIndex] = useState(-1);
+  const [isReplaying, setIsReplaying] = useState(false);
 
   const authHeaders = useMemo(
     () => ({
@@ -398,6 +402,7 @@ export default function CommandCenterPage() {
       }
       setStoryWindowMinutes(String(safeWindow));
       setExecutiveStory(data);
+      setReplayIndex(-1);
       setToast({ type: "success", message: "Executive attack story loaded" });
     } catch {
       const message = "Failed to load executive attack story";
@@ -433,6 +438,25 @@ export default function CommandCenterPage() {
       setToast({ type: "success", message: "Executive report exported" });
     } catch {
       setToast({ type: "error", message: "Executive report export failed" });
+    }
+  }
+
+  async function playExecutiveReplay() {
+    if (isReplaying) return;
+    const events = executiveStory?.timeline || [];
+    if (!events.length) {
+      setToast({ type: "error", message: "No timeline events available to replay" });
+      return;
+    }
+
+    setIsReplaying(true);
+    setReplayIndex(-1);
+    try {
+      await replayTimeline(events, (_event, idx) => setReplayIndex(idx), 1200);
+      setToast({ type: "success", message: "Timeline replay completed" });
+    } finally {
+      setIsReplaying(false);
+      setTimeout(() => setReplayIndex(-1), 1000);
     }
   }
 
@@ -1073,6 +1097,7 @@ export default function CommandCenterPage() {
           <div style={miniCard}><div style={miniTitle}>Events</div><div>{executiveStory?.summary?.total_events ?? "-"}</div></div>
           <div style={miniCard}><div style={miniTitle}>Alerts</div><div>{executiveStory?.summary?.total_alerts ?? "-"}</div></div>
           <div style={miniCard}><div style={miniTitle}>Critical Alerts</div><div>{executiveStory?.summary?.critical_alerts ?? "-"}</div></div>
+          <div style={miniCard}><div style={miniTitle}>Risk Score</div><div>{executiveStory?.summary?.risk_score ?? "-"}/100</div></div>
           <div style={miniCard}><div style={miniTitle}>Open Incidents</div><div>{executiveStory?.summary?.open_incidents ?? "-"}</div></div>
         </div>
 
@@ -1087,6 +1112,13 @@ export default function CommandCenterPage() {
 
         <div style={{ marginTop: 10 }}>
           <h4 style={{ margin: 0, color: "#cbd5e1" }}>Attack Timeline</h4>
+          <div style={{ marginTop: 8, marginBottom: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button style={btn} onClick={playExecutiveReplay} disabled={isReplaying || storyLoading}>
+              {isReplaying ? "Playing Replay..." : "Play Timeline Replay"}
+            </button>
+            <button style={btnSecondary} onClick={() => setReplayIndex(-1)}>Reset Replay</button>
+          </div>
+          <Timeline events={executiveStory?.timeline || []} replayIndex={replayIndex} />
           <ul style={list}>
             {(executiveStory?.timeline || []).slice(0, 12).map((item) => (
               <li key={`${item.id}-${item.timestamp}`} style={row}>
