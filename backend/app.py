@@ -110,6 +110,190 @@ def render_board_report_markdown(report: dict) -> str:
     return "\n".join(markdown) + "\n"
 
 
+def _event_story_title(event_type: str) -> str:
+    titles = {
+        "email": "Suspicious email delivery observed",
+        "email_click": "User engaged with suspicious content",
+        "login_anomaly": "Impossible-travel login pattern detected",
+        "oauth_grant": "Untrusted OAuth consent granted",
+        "powershell_exec": "Encoded PowerShell execution detected",
+        "file_download": "Sensitive file access detected",
+        "data_exfil": "Outbound exfiltration behavior detected",
+    }
+    return titles.get(event_type, f"{event_type} observed")
+
+
+def _event_story_severity(event_type: str) -> str:
+    if event_type in {"powershell_exec", "data_exfil", "login_anomaly"}:
+        return "high"
+    if event_type in {"oauth_grant", "email_click", "file_download"}:
+        return "medium"
+    return "low"
+
+
+def render_executive_story_markdown(report: dict) -> str:
+    summary = report["summary"]
+    timeline = report["timeline"]
+    key_findings = report["key_findings"]
+
+    markdown = [
+        "# Executive Attack Story Report",
+        "",
+        f"Generated: {report['generated_at']}",
+        f"Tenant: {report['tenant_id']}",
+        f"Window: last {report['window_minutes']} minutes",
+        "",
+        "## Summary",
+        f"- Events analyzed: {summary['total_events']}",
+        f"- Alerts in window: {summary['total_alerts']}",
+        f"- Critical alerts: {summary['critical_alerts']}",
+        f"- Open incidents: {summary['open_incidents']}",
+        "",
+        "## Key Findings",
+    ]
+
+    for finding in key_findings:
+        markdown.append(f"- {finding}")
+
+    markdown.extend(["", "## Attack Timeline"])
+    if timeline:
+        for item in timeline:
+            actor = item.get("user") or "unknown-user"
+            location = item.get("location") or "n/a"
+            markdown.append(
+                f"- {item['timestamp']} [{item['severity']}] {item['title']} :: user={actor}, location={location}"
+            )
+    else:
+        markdown.append("- No events in selected window")
+
+    return "\n".join(markdown) + "\n"
+
+
+def build_executive_attack_story_report(tenant_id: str, window_minutes: int = 180, event_limit: int = 140) -> dict:
+    safe_window_minutes = max(15, min(window_minutes, 1440))
+    safe_event_limit = max(20, min(event_limit, 400))
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, raw, timestamp
+                FROM events
+                WHERE tenant_id=%s
+                  AND timestamp >= NOW() - (%s * INTERVAL '1 minute')
+                ORDER BY timestamp ASC
+                LIMIT %s
+                """,
+                (tenant_id, safe_window_minutes, safe_event_limit),
+            )
+            rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total_alerts,
+                       SUM(CASE WHEN severity='critical' THEN 1 ELSE 0 END) AS critical_alerts,
+                       SUM(CASE WHEN severity='high' THEN 1 ELSE 0 END) AS high_alerts
+                FROM alerts
+                WHERE tenant_id=%s
+                  AND detected_at >= NOW() - (%s * INTERVAL '1 minute')
+                """,
+                (tenant_id, safe_window_minutes),
+            )
+            alert_summary = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT COUNT(*) AS open_incidents
+                FROM incidents
+                WHERE tenant_id=%s
+                  AND status <> 'resolved'
+                """,
+                (tenant_id,),
+            )
+            incident_summary = cur.fetchone()
+
+    normalized_events = []
+    event_type_counts: dict[str, int] = {}
+    user_counts: dict[str, int] = {}
+    scenario_counts: dict[str, int] = {}
+
+    for row in rows:
+        raw = row.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                raw = {}
+        raw = raw or {}
+        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        event_type = row["type"]
+        user = row.get("user_id") or "unknown-user"
+        scenario = raw.get("scenario") or payload_raw.get("scenario")
+
+        normalized_events.append(
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"].isoformat(),
+                "event_type": event_type,
+                "title": _event_story_title(event_type),
+                "severity": _event_story_severity(event_type),
+                "user": user,
+                "ip": raw.get("ip") or payload_raw.get("ip"),
+                "location": raw.get("from") or raw.get("location") or payload_raw.get("from") or payload_raw.get("location"),
+                "scenario": scenario,
+            }
+        )
+
+        event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+        user_counts[user] = user_counts.get(user, 0) + 1
+        if scenario:
+            scenario_counts[scenario] = scenario_counts.get(scenario, 0) + 1
+
+    top_event_types = [
+        {"event_type": key, "count": value}
+        for key, value in sorted(event_type_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+    ]
+    top_users = [
+        {"user": key, "count": value}
+        for key, value in sorted(user_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+    ]
+    top_scenarios = [
+        {"scenario": key, "count": value}
+        for key, value in sorted(scenario_counts.items(), key=lambda item: item[1], reverse=True)[:3]
+    ]
+
+    total_alerts = int(alert_summary.get("total_alerts") or 0)
+    critical_alerts = int(alert_summary.get("critical_alerts") or 0)
+    high_alerts = int(alert_summary.get("high_alerts") or 0)
+    open_incidents = int(incident_summary.get("open_incidents") or 0)
+
+    findings = [
+        f"{critical_alerts} critical alerts and {high_alerts} high alerts were detected in the selected window.",
+        f"{open_incidents} incidents remain open and require analyst follow-up.",
+        "No dominant attack scenario observed yet.",
+    ]
+    if top_scenarios:
+        findings[2] = f"Most active scenario: {top_scenarios[0]['scenario']} ({top_scenarios[0]['count']} events)."
+
+    return {
+        "generated_at": now_utc().isoformat(),
+        "tenant_id": tenant_id,
+        "window_minutes": safe_window_minutes,
+        "summary": {
+            "total_events": len(normalized_events),
+            "total_alerts": total_alerts,
+            "critical_alerts": critical_alerts,
+            "high_alerts": high_alerts,
+            "open_incidents": open_incidents,
+            "top_event_types": top_event_types,
+            "top_users": top_users,
+            "top_scenarios": top_scenarios,
+        },
+        "key_findings": findings,
+        "timeline": normalized_events,
+    }
+
+
 def get_report_schedule_row(cur, schedule_id: int) -> dict:
     cur.execute(
         """
@@ -1916,6 +2100,40 @@ def get_events(
             }
         )
     return normalized
+
+
+@app.get("/reports/executive/story")
+def get_executive_attack_story(
+    window_minutes: int = 180,
+    event_limit: int = 140,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    return build_executive_attack_story_report(
+        tenant_id=tenant_id,
+        window_minutes=window_minutes,
+        event_limit=event_limit,
+    )
+
+
+@app.get("/reports/executive/story.md")
+def download_executive_attack_story_markdown(
+    window_minutes: int = 180,
+    event_limit: int = 140,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    report = build_executive_attack_story_report(
+        tenant_id=tenant_id,
+        window_minutes=window_minutes,
+        event_limit=event_limit,
+    )
+    filename = f"executive-attack-story-{tenant_id}.md"
+    return PlainTextResponse(
+        content=render_executive_story_markdown(report),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/incidents")
