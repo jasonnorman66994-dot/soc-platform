@@ -13,6 +13,8 @@ export default function AuditDashboard() {
   const [agents, setAgents] = useState(null);
   const [drills, setDrills] = useState(null);
   const [highestRisk, setHighestRisk] = useState(null);
+  const [emailDrive, setEmailDrive] = useState(null);
+  const [nullRouting, setNullRouting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [windowDays, setWindowDays] = useState(30);
 
@@ -28,7 +30,7 @@ export default function AuditDashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [stats_result, audit_result, jit_result, threat_result, agents_result, drills_result, risk_result] = await Promise.allSettled([
+      const [stats_result, audit_result, jit_result, threat_result, agents_result, drills_result, risk_result, email_result] = await Promise.allSettled([
         fetch(`${API}/soar/stats?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${API}/soar/audit?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${API}/jit/status`, { headers: headers() }),
@@ -36,6 +38,7 @@ export default function AuditDashboard() {
         fetch(`${API}/agents/status`, { headers: headers() }),
         fetch(`${API}/drills/history`, { headers: headers() }),
         fetch(`${API}/risk/highest-user`, { headers: headers() }),
+        fetch(`${API}/email/drive-status`, { headers: headers() }),
       ]);
       if (stats_result.status === "fulfilled" && stats_result.value.ok) setStats(await stats_result.value.json());
       if (audit_result.status === "fulfilled" && audit_result.value.ok) setAudit(await audit_result.value.json());
@@ -44,6 +47,7 @@ export default function AuditDashboard() {
       if (agents_result.status === "fulfilled" && agents_result.value.ok) setAgents(await agents_result.value.json());
       if (drills_result.status === "fulfilled" && drills_result.value.ok) setDrills(await drills_result.value.json());
       if (risk_result.status === "fulfilled" && risk_result.value.ok) setHighestRisk(await risk_result.value.json());
+      if (email_result.status === "fulfilled" && email_result.value.ok) setEmailDrive(await email_result.value.json());
     } catch (e) {
       console.error("AuditDashboard load error:", e);
     } finally {
@@ -80,6 +84,34 @@ export default function AuditDashboard() {
     const latest = dots[dots.length - 1];
     return { width, height, path, dots, latest_z_score: latest?.z ?? 0, latest_deviation_pct: latest?.deviation_pct ?? 0, mean: Math.round(mean * 10) / 10, stddev: Math.round(stddev * 10) / 10 };
   }, [audit]);
+
+  const email_pulse = useMemo(() => {
+    const tlds = emailDrive?.flagged_tlds || [];
+    if (!tlds.length) return null;
+    const top = tlds[0];
+    const width = 320;
+    const height = 72;
+    const padding = 8;
+    const z = top.z_score || 0;
+    const points = [
+      { x: padding, y: height - padding, label: "baseline" },
+      { x: width * 0.3, y: height - padding - 10, label: "rising" },
+      { x: width * 0.6, y: height - padding - (z / (z + 2)) * (height - padding * 2), label: "spike" },
+      { x: width - padding, y: height - padding - (z / (z + 4)) * (height - padding * 2) * 0.6, label: "current" },
+    ];
+    const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+    return { width, height, path, points, top, total_flagged: tlds.length };
+  }, [emailDrive]);
+
+  const handleNullRoute = async (tld) => {
+    setNullRouting(true);
+    try {
+      await fetch(`${API}/email/nullroute-tld?tld=${encodeURIComponent(tld)}`, { method: "POST", headers: headers() });
+      await load();
+    } finally {
+      setNullRouting(false);
+    }
+  };
 
   const card = { background: "#1e1e2e", borderRadius: 10, padding: 20, marginBottom: 16, border: "1px solid #333" };
   const kpi = { background: "#252540", borderRadius: 8, padding: 16, textAlign: "center", flex: 1, minWidth: 140 };
@@ -143,6 +175,58 @@ export default function AuditDashboard() {
             }}>
               Baseline Deviation: {sovereign_pulse.latest_deviation_pct > 0 ? "+" : ""}{sovereign_pulse.latest_deviation_pct}%
             </span>
+          </div>
+        </div>
+      )}
+
+      {/* Email Infiltration — Electric Purple Pulse */}
+      {email_pulse && (
+        <div style={{ ...card, border: "1px solid #7c3aed" }}>
+          <h2 style={{ color: "#c4b5fd", marginBottom: 12 }}>Email Infiltration</h2>
+          <p style={{ color: "#888", fontSize: 12, marginBottom: 8 }}>
+            Link-density spike from <strong style={{ color: "#a78bfa" }}>{email_pulse.top.tld}</strong> — z-score {email_pulse.top.z_score} (&gt;3.5σ threshold)
+          </p>
+          <svg viewBox={`0 0 ${email_pulse.width} ${email_pulse.height}`} style={{ width: "100%", height: 88, display: "block" }} role="img" aria-label="Email Infiltration sparkline">
+            <path d={email_pulse.path} fill="none" stroke="#a855f7" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+            {email_pulse.points.map((pt) => (
+              <circle key={pt.label} cx={pt.x} cy={pt.y} r={5} fill="#a855f7" stroke="#0f172a" strokeWidth="2">
+                <title>{pt.label}</title>
+              </circle>
+            ))}
+          </svg>
+          <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ background: "#4c1d95", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#c4b5fd" }}>
+              z-score: {email_pulse.top.z_score}
+            </span>
+            <span style={{ background: "#1e293b", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#94a3b8" }}>
+              Link Density: {email_pulse.top.current_avg_link_density} (mean: {email_pulse.top.baseline_mean})
+            </span>
+            <span style={{ background: "#1e293b", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#94a3b8" }}>
+              Msgs This Hour: {email_pulse.top.current_hour_msgs}
+            </span>
+            {emailDrive?.current_hour_intercepted > 0 && (
+              <span style={{ background: "#450a0a", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#fca5a5" }}>
+                Intercepted: {emailDrive.current_hour_intercepted}
+              </span>
+            )}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <button
+              onClick={() => handleNullRoute(email_pulse.top.tld)}
+              disabled={nullRouting}
+              style={{
+                background: nullRouting ? "#4c1d95" : "#7c3aed",
+                color: "#fff",
+                border: "1px solid #a855f7",
+                borderRadius: 6,
+                padding: "8px 18px",
+                cursor: nullRouting ? "wait" : "pointer",
+                fontWeight: 600,
+                fontSize: 13,
+              }}
+            >
+              {nullRouting ? "Null-Routing..." : `Null-Route Current Spam Drive (${email_pulse.top.tld})`}
+            </button>
           </div>
         </div>
       )}
