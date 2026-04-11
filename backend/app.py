@@ -1145,13 +1145,22 @@ def _detect_email_spam_drive(tenant_id: str) -> dict:
             "msg_count": int(row.get("msg_count") or 0),
         })
 
+    # Determine the actual current hour bucket for accurate detection
+    from datetime import datetime as _dt, timezone as _tz
+    current_hour = _dt.now(_tz.utc).replace(minute=0, second=0, microsecond=0)
+
     flagged: list[dict] = []
     for tld, buckets in tld_buckets.items():
         if len(buckets) < 2:
             continue
-        densities = [b["avg_link_density"] for b in buckets]
-        current = densities[-1]
-        baseline = densities[:-1]
+        # Only treat the actual current hour as "current"; use all others as baseline
+        current_bucket = next((b for b in buckets if b["hour"] and b["hour"].replace(tzinfo=_tz.utc) == current_hour), None)
+        if current_bucket is None:
+            continue  # No data for the current hour — skip this TLD
+        baseline = [b["avg_link_density"] for b in buckets if b is not current_bucket]
+        if not baseline:
+            continue
+        current = current_bucket["avg_link_density"]
         mean = sum(baseline) / len(baseline)
         variance = sum((v - mean) ** 2 for v in baseline) / len(baseline)
         stddev = variance ** 0.5
@@ -1163,9 +1172,12 @@ def _detect_email_spam_drive(tenant_id: str) -> dict:
                 "current_avg_link_density": round(current, 2),
                 "baseline_mean": round(mean, 2),
                 "baseline_stddev": round(stddev, 2),
-                "current_hour_msgs": buckets[-1]["msg_count"],
+                "current_hour_msgs": current_bucket["msg_count"],
                 "threat_type": "spamming_drive",
             })
+
+    # Sort by severity: highest z_score first, then most messages
+    flagged.sort(key=lambda f: (-f["z_score"], -f["current_hour_msgs"]))
 
     return {
         "flagged_tlds": flagged,
@@ -1177,8 +1189,9 @@ def _detect_email_spam_drive(tenant_id: str) -> dict:
 def _nullroute_spam_tld(tenant_id: str, tld: str) -> dict:
     """Blacklist an anomalous TLD by upserting it into shared_threats."""
     reason = f"Spamming Drive null-routed: TLD {tld} flagged for link-density anomaly"
+    indicator = f"tld:{tld}"
     _upsert_shared_threat(
-        ip=tld,
+        ip=indicator,
         source_tenant=tenant_id,
         category="spamming_drive",
         risk=95,
@@ -1207,7 +1220,7 @@ def _email_drive_status(tenant_id: str) -> dict:
     current_hour_total = int(row.get("cnt") or 0) if row else 0
     return {
         **detection,
-        "current_hour_intercepted": current_hour_total,
+        "current_hour_msgs": current_hour_total,
     }
 
 
@@ -4340,16 +4353,16 @@ async def voice_command_endpoint(
             reasoning = (
                 f"Spamming Drive detected on TLD {top['tld']}: "
                 f"z-score {top['z_score']} (link density {top['current_avg_link_density']} vs baseline mean {top['baseline_mean']}). "
-                f"{drive['current_hour_intercepted']} messages intercepted in the current hourly bucket."
+                f"{drive['current_hour_msgs']} messages in the current hourly bucket."
             )
         else:
-            reasoning = f"No active spamming drives detected. {drive['current_hour_intercepted']} email messages in the current hourly bucket."
+            reasoning = f"No active spamming drives detected. {drive['current_hour_msgs']} email messages in the current hourly bucket."
         result = {
             "command": "email_drive_status",
             "intent": command,
             "status": drive["status"],
             "flagged_tlds": flagged,
-            "current_hour_intercepted": drive["current_hour_intercepted"],
+            "current_hour_msgs": drive["current_hour_msgs"],
             "reasoning": [reasoning],
         }
 

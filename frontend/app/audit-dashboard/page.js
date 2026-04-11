@@ -105,13 +105,18 @@ export default function AuditDashboard() {
       { x: width - padding, y: height - padding - (z / (z + 4)) * (height - padding * 2) * 0.6, label: "current" },
     ];
     const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-    return { width, height, path, points, top, total_flagged: tlds.length };
+    return { width, height, path, points, top, total_flagged: tlds.length, sorted_tlds };
   }, [emailDrive]);
 
   const handleNullRoute = async (tld) => {
     setNullRouting(true);
     try {
-      await fetch(`${API}/email/nullroute-tld?tld=${encodeURIComponent(tld)}`, { method: "POST", headers: headers() });
+      const res = await fetch(`${API}/email/nullroute-tld?tld=${encodeURIComponent(tld)}`, { method: "POST", headers: headers() });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "Unknown error");
+        alert(`Null-route failed (${res.status}): ${errText}`);
+        return;
+      }
       await load();
     } finally {
       setNullRouting(false);
@@ -209,9 +214,9 @@ export default function AuditDashboard() {
             <span style={{ background: "#1e293b", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#94a3b8" }}>
               Msgs This Hour: {email_pulse.top.current_hour_msgs}
             </span>
-            {emailDrive?.current_hour_intercepted > 0 && (
+            {emailDrive?.current_hour_msgs > 0 && (
               <span style={{ background: "#450a0a", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#fca5a5" }}>
-                Intercepted: {emailDrive.current_hour_intercepted}
+                Total This Hour: {emailDrive.current_hour_msgs}
               </span>
             )}
           </div>

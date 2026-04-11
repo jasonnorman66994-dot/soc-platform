@@ -102,14 +102,13 @@ def run_spam_drive(
             chunk = min(batch_size, remaining)
             events = generate_email_events(tenant_id, target_user, tld, chunk, rng, burst=True)
             with conn.cursor() as cur:
-                for record in events:
-                    cur.execute(
-                        """
-                        INSERT INTO events (tenant_id, user_id, type, raw, timestamp)
-                        VALUES (%s, %s, %s, %s::jsonb, %s)
-                        """,
-                        record,
-                    )
+                cur.executemany(
+                    """
+                    INSERT INTO events (tenant_id, user_id, type, raw, timestamp)
+                    VALUES (%s, %s, %s, %s::jsonb, %s)
+                    """,
+                    events,
+                )
             conn.commit()
             inserted += chunk
             remaining -= chunk
@@ -133,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Email Spamming Drive — stress-test Z-score anomaly detection")
     parser.add_argument("--tenant-id", default="demo-corp")
     parser.add_argument("--target-user", default="cyber.lead")
-    parser.add_argument("--tld", default="evil-spam.xyz", help="Sender TLD for the spam drive")
+    parser.add_argument("--tld", default=None, help="Sender TLD for the spam drive (random from SPAM_TLDS if omitted)")
     parser.add_argument("--total", type=int, default=500, help="Total email events to generate")
     parser.add_argument("--batch-size", type=int, default=100, help="Events per insert batch")
     parser.add_argument("--seed", type=int, default=99)
@@ -143,10 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    tld = args.tld or random.choice(SPAM_TLDS)
     result = run_spam_drive(
         tenant_id=args.tenant_id,
         target_user=args.target_user,
-        tld=args.tld,
+        tld=tld,
         total_events=args.total,
         batch_size=args.batch_size,
         seed=args.seed,
