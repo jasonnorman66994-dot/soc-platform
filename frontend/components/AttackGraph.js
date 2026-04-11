@@ -3,12 +3,12 @@
 import ReactFlow, { Background, Controls, MiniMap } from "reactflow";
 import "reactflow/dist/style.css";
 
-export default function AttackGraph({ nodes, edges }) {
+export default function AttackGraph({ nodes, edges, onNodeClick }) {
   return (
     <section style={panel}>
       <h2 style={title}>Investigation Graph</h2>
       <div style={graph_wrap}>
-        <ReactFlow fitView nodes={nodes} edges={edges}>
+        <ReactFlow fitView nodes={nodes} edges={edges} onNodeClick={onNodeClick}>
           <Background gap={18} color="#1e293b" />
           <MiniMap pannable />
           <Controls />

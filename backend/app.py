@@ -146,6 +146,154 @@ def _calculate_risk_score(critical_alerts: int, high_alerts: int, total_alerts: 
     return min(score, 100)
 
 
+def _normalize_intelligence_events(rows: list[dict]) -> list[dict]:
+    normalized = []
+    for row in rows:
+        raw = row.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                raw = {}
+        raw = raw or {}
+        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        user = row.get("user_id") or "unknown-user"
+        ip = raw.get("ip") or payload_raw.get("ip")
+        geo = raw.get("from") or raw.get("location") or payload_raw.get("from") or payload_raw.get("location")
+        normalized.append(
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"].isoformat(),
+                "action": row["type"],
+                "actor": {"user": user, "ip": ip},
+                "metadata": {"geo": geo},
+            }
+        )
+    return normalized
+
+
+def _build_entity_contexts(events: list[dict]) -> dict[str, dict]:
+    contexts: dict[str, dict] = {}
+    for event in events:
+        actor = event.get("actor") or {}
+        user = actor.get("user")
+        if not user:
+            continue
+        ctx = contexts.setdefault(
+            user,
+            {
+                "user": user,
+                "ips": set(),
+                "geos": set(),
+                "actions": [],
+                "last_seen": event.get("timestamp"),
+            },
+        )
+
+        if actor.get("ip"):
+            ctx["ips"].add(actor.get("ip"))
+        geo = (event.get("metadata") or {}).get("geo")
+        if geo:
+            ctx["geos"].add(geo)
+        action = event.get("action")
+        if action:
+            ctx["actions"].append(action)
+        ctx["last_seen"] = event.get("timestamp")
+
+    return contexts
+
+
+def _detect_behavior_patterns(ctx: dict) -> list[str]:
+    patterns = []
+    actions = ctx.get("actions") or []
+
+    has_login = any(item in actions for item in ["login_success", "login_anomaly"])
+    if len(ctx.get("geos") or set()) > 1 and has_login:
+        patterns.append("IMPOSSIBLE_TRAVEL_CHAIN")
+
+    if has_login and "data_exfil" in actions:
+        patterns.append("ACCOUNT_TAKEOVER")
+
+    return patterns
+
+
+def _calculate_context_risk(ctx: dict, alerts: list[dict], patterns: list[str]) -> int:
+    score = 0
+
+    for alert in alerts:
+        severity = (alert.get("severity") or "").lower()
+        if severity == "critical":
+            score += 40
+        elif severity == "high":
+            score += 25
+        elif severity == "medium":
+            score += 10
+
+    for pattern in patterns:
+        if pattern == "ACCOUNT_TAKEOVER":
+            score += 50
+        elif pattern == "IMPOSSIBLE_TRAVEL_CHAIN":
+            score += 30
+
+    if len(ctx.get("ips") or set()) > 2:
+        score += 10
+
+    return min(score, 100)
+
+
+def _build_incident_intelligence_graph(events: list[dict], risk_by_user: dict[str, int]) -> dict:
+    nodes_by_id: dict[str, dict] = {}
+    edges: list[dict] = []
+
+    for event in events:
+        event_id = f"event:{event['id']}"
+        action = event.get("action") or "event"
+        actor = event.get("actor") or {}
+        user = actor.get("user")
+        ip = actor.get("ip")
+
+        nodes_by_id[event_id] = {
+            "id": event_id,
+            "type": "event",
+            "label": action,
+            "event_id": event.get("id"),
+            "timestamp": event.get("timestamp"),
+        }
+
+        user_id = None
+        if user:
+            user_id = f"user:{user}"
+            nodes_by_id[user_id] = {
+                "id": user_id,
+                "type": "user",
+                "label": user,
+                "risk_score": risk_by_user.get(user, 0),
+            }
+            edges.append({"from": user_id, "to": event_id, "label": action})
+
+        if ip:
+            ip_id = f"ip:{ip}"
+            nodes_by_id[ip_id] = {
+                "id": ip_id,
+                "type": "ip",
+                "label": ip,
+            }
+            if user_id:
+                relation = "login_from" if action in {"login_success", "login_anomaly"} else "seen_from"
+                edges.append({"from": user_id, "to": ip_id, "label": relation})
+
+    dedup_edges = []
+    seen = set()
+    for edge in edges:
+        key = (edge["from"], edge["to"], edge["label"])
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup_edges.append(edge)
+
+    return {"nodes": list(nodes_by_id.values()), "edges": dedup_edges}
+
+
 def render_executive_story_markdown(report: dict) -> str:
     summary = report["summary"]
     timeline = report["timeline"]
@@ -2116,6 +2264,37 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
     for a in alerts:
         await broadcast(tenant_id, {"kind": "alert", **a})
 
+    context_events = [item for item in recent_events if item.get("user_id") == event.user_id]
+    context = _build_entity_contexts(
+        [
+            {
+                "id": item.get("id"),
+                "timestamp": item.get("timestamp"),
+                "action": item.get("event_type"),
+                "actor": {"user": item.get("user_id"), "ip": item.get("ip")},
+                "metadata": {"geo": None},
+            }
+            for item in context_events
+        ]
+    ).get(event.user_id)
+
+    if context:
+        patterns = _detect_behavior_patterns(context)
+        user_alerts = [
+            {"severity": item.get("severity"), "summary": item.get("summary")}
+            for item in alert_rows
+        ]
+        risk_score = _calculate_context_risk(context, user_alerts, patterns)
+        await broadcast(
+            tenant_id,
+            {
+                "kind": "intelligence_update",
+                "user": event.user_id,
+                "risk_score": risk_score,
+                "patterns": patterns,
+            },
+        )
+
     log_action(tenant_id, None, "event.ingest", "events", {"event_id": saved_event["id"], "alerts": len(alert_rows)})
 
     return {
@@ -2204,6 +2383,93 @@ def download_executive_attack_story_markdown(
         media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/intelligence/overview")
+def get_intelligence_overview(
+    window_minutes: int = 180,
+    event_limit: int = 300,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    safe_window_minutes = max(15, min(window_minutes, 1440))
+    safe_event_limit = max(20, min(event_limit, 500))
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, raw, timestamp
+                FROM events
+                WHERE tenant_id=%s
+                  AND timestamp >= NOW() - (%s * INTERVAL '1 minute')
+                ORDER BY timestamp ASC
+                LIMIT %s
+                """,
+                (tenant_id, safe_window_minutes, safe_event_limit),
+            )
+            event_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT a.id, a.severity, a.summary, e.user_id
+                FROM alerts a
+                JOIN events e ON e.id = a.event_id
+                WHERE a.tenant_id=%s
+                  AND a.detected_at >= NOW() - (%s * INTERVAL '1 minute')
+                ORDER BY a.id DESC
+                LIMIT 500
+                """,
+                (tenant_id, safe_window_minutes),
+            )
+            alert_rows = cur.fetchall()
+
+    events = _normalize_intelligence_events(event_rows)
+    contexts = _build_entity_contexts(events)
+
+    alerts_by_user: dict[str, list[dict]] = {}
+    for row in alert_rows:
+        user = row.get("user_id") or "unknown-user"
+        alerts_by_user.setdefault(user, []).append(
+            {
+                "id": row.get("id"),
+                "severity": row.get("severity"),
+                "summary": row.get("summary"),
+            }
+        )
+
+    intelligence = []
+    risk_by_user: dict[str, int] = {}
+    for user, ctx in contexts.items():
+        patterns = _detect_behavior_patterns(ctx)
+        user_alerts = alerts_by_user.get(user, [])
+        risk_score = _calculate_context_risk(ctx, user_alerts, patterns)
+        risk_by_user[user] = risk_score
+        intelligence.append(
+            {
+                "user": user,
+                "risk_score": risk_score,
+                "patterns": patterns,
+                "context": {
+                    "ips": sorted(list(ctx.get("ips") or set())),
+                    "geos": sorted(list(ctx.get("geos") or set())),
+                    "actions": (ctx.get("actions") or [])[-12:],
+                    "last_seen": ctx.get("last_seen"),
+                },
+                "alert_count": len(user_alerts),
+            }
+        )
+
+    intelligence.sort(key=lambda item: item.get("risk_score", 0), reverse=True)
+    graph = _build_incident_intelligence_graph(events, risk_by_user)
+
+    return {
+        "tenant_id": tenant_id,
+        "window_minutes": safe_window_minutes,
+        "event_count": len(events),
+        "intelligence": intelligence,
+        "graph": graph,
+    }
 
 
 @app.get("/incidents")
