@@ -1,0 +1,53 @@
+services:
+  api:
+    build:
+      context: ../../backend
+    command: ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_LOGS_TOPIC: logs
+      SOC_CORE_DATABASE_URL: postgresql+psycopg2://soc:socpass@postgres:5432/socdb
+    depends_on:
+      - kafka
+      - postgres
+
+  worker:
+    build:
+      context: ../../backend
+    command: ["python", "-m", "workers.consumer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_LOGS_TOPIC: logs
+      SOC_CORE_DATABASE_URL: postgresql+psycopg2://soc:socpass@postgres:5432/socdb
+    depends_on:
+      - kafka
+      - postgres
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: soc
+      POSTGRES_PASSWORD: socpass
+      POSTGRES_DB: socdb
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:latest

@@ -30,6 +30,29 @@ Prototype endpoints:
 - `POST /ingest` accepts a `LogEvent` payload and returns basic detection alerts.
 - `GET /events` returns buffered ingested events.
 
+### Production SOC Core Stack (Phase 2)
+
+Production-oriented stream pipeline components are now scaffolded:
+
+- `backend/api/server.py` (ingestion and query API)
+- `backend/ingestion/producer.py` (Kafka producer)
+- `backend/workers/consumer.py` (Kafka consumer + detection + persistence)
+- `backend/storage/db.py` and `backend/storage/models.py` (SQLAlchemy persistence)
+- `infrastructure/docker/docker-compose.yml` (API + worker + Kafka + Postgres + Redis)
+
+Run the production core stack:
+
+```bash
+cd infrastructure/docker
+docker compose up --build
+```
+
+Core SOC API endpoints:
+
+- `POST /ingest` queues events into Kafka.
+- `GET /events` returns persisted events from PostgreSQL.
+- `GET /alerts` returns generated alerts from PostgreSQL.
+
 ## Services
 
 - backend: FastAPI gateway with multi-tenant isolation, onboarding, billing scaffold, audit logs, executive metrics
