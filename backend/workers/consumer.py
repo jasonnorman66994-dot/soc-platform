@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 
 from kafka import KafkaConsumer
 
+from correlation.engine import build_incident
 from detection.rules import detect
 from storage.db import SessionLocal, engine
-from storage.models import Alert, Base, Event
+from storage.models import Alert, Base, Event, Incident
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_LOGS_TOPIC = os.getenv("KAFKA_LOGS_TOPIC", "logs")
@@ -59,6 +60,24 @@ def run() -> None:
                         details=item,
                     )
                 )
+
+            incident_payload = build_incident(event, alerts)
+            if incident_payload is not None:
+                incident_row = (
+                    db.query(Incident)
+                    .filter(Incident.fingerprint == incident_payload["fingerprint"])
+                    .first()
+                )
+
+                if incident_row is None:
+                    db.add(Incident(**incident_payload))
+                else:
+                    incident_row.last_seen = incident_payload["last_seen"]
+                    incident_row.event_count += 1
+                    incident_row.alert_count += len(alerts)
+                    incident_row.severity = incident_payload["severity"]
+                    incident_row.description = incident_payload["description"]
+                    incident_row.context = incident_payload["context"]
 
             db.commit()
 

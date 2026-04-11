@@ -39,3 +39,30 @@ class Alert(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class Incident(Base):
+    __tablename__ = "soc_core_incidents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    alert_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
