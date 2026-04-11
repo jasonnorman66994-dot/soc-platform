@@ -1,0 +1,13 @@
+id: WIN-POWERSHELL-001
+title: Encoded PowerShell Command
+author: SOC Team
+source: microsoft
+severity: critical
+confidence: 90
+mitre: T1059.001
+summary: Encoded PowerShell command execution detected
+detection:
+  selection:
+    event_type: powershell_exec
+    raw.encoded_command: true
+  condition: selection
