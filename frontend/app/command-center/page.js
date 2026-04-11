@@ -37,6 +37,7 @@ function deriveVoiceIntent(transcript) {
     { patterns: [/disable\s*ghost\s*mode/, /ghost\s*mode\s*off/, /deactivate\s*ghost/], intent: "disable_ghost_mode" },
     { patterns: [/run\s*(a\s*)?(security\s*)?drill/, /security\s*drill/, /start\s*drill/], intent: "run_security_drill" },
     { patterns: [/lower\s*threshold/], intent: null },
+    { patterns: [/status\s*of\s*(the\s*)?(current\s*)?email\s*drive/, /email\s*drive\s*status/, /spam\s*drive\s*status/, /current\s*email\s*drive/, /email\s*drive/], intent: "email_drive_status" },
   ];
 
   for (const { patterns, intent } of MULTI_INTENT_MAP) {

@@ -1106,6 +1106,125 @@ def _identify_highest_risk_user(tenant_id: str) -> dict:
     }
 
 
+def _detect_email_spam_drive(tenant_id: str) -> dict:
+    """Detect TLD-level link-density spikes using hourly-bucket Z-score analysis.
+
+    Flags a TLD as a 'Spamming Drive' if the mean link_density per email from
+    that TLD jumps > 3.5 standard deviations in the current hour bucket.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    raw->>'tld' AS tld,
+                    date_trunc('hour', timestamp) AS hour_bucket,
+                    AVG((raw->>'link_density')::numeric) AS avg_link_density,
+                    COUNT(*) AS msg_count
+                FROM events
+                WHERE tenant_id=%s
+                  AND type='email_received'
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                  AND raw->>'tld' IS NOT NULL
+                GROUP BY raw->>'tld', date_trunc('hour', timestamp)
+                ORDER BY tld, hour_bucket
+                """,
+                (tenant_id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        return {"flagged_tlds": [], "status": "clear", "detail": "No email events in the last 7 days."}
+
+    tld_buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        tld = row.get("tld") or "unknown"
+        tld_buckets.setdefault(tld, []).append({
+            "hour": row.get("hour_bucket"),
+            "avg_link_density": float(row.get("avg_link_density") or 0),
+            "msg_count": int(row.get("msg_count") or 0),
+        })
+
+    # Determine the actual current hour bucket for accurate detection
+    from datetime import datetime as _dt, timezone as _tz
+    current_hour = _dt.now(_tz.utc).replace(minute=0, second=0, microsecond=0)
+
+    flagged: list[dict] = []
+    for tld, buckets in tld_buckets.items():
+        if len(buckets) < 2:
+            continue
+        # Only treat the actual current hour as "current"; use all others as baseline
+        current_bucket = next((b for b in buckets if b["hour"] and b["hour"].replace(tzinfo=_tz.utc) == current_hour), None)
+        if current_bucket is None:
+            continue  # No data for the current hour — skip this TLD
+        baseline = [b["avg_link_density"] for b in buckets if b is not current_bucket]
+        if not baseline:
+            continue
+        current = current_bucket["avg_link_density"]
+        mean = sum(baseline) / len(baseline)
+        variance = sum((v - mean) ** 2 for v in baseline) / len(baseline)
+        stddev = variance ** 0.5
+        z = 0.0 if stddev == 0 else round((current - mean) / stddev, 2)
+        if z > 3.5:
+            flagged.append({
+                "tld": tld,
+                "z_score": z,
+                "current_avg_link_density": round(current, 2),
+                "baseline_mean": round(mean, 2),
+                "baseline_stddev": round(stddev, 2),
+                "current_hour_msgs": current_bucket["msg_count"],
+                "threat_type": "spamming_drive",
+            })
+
+    # Sort by severity: highest z_score first, then most messages
+    flagged.sort(key=lambda f: (-f["z_score"], -f["current_hour_msgs"]))
+
+    return {
+        "flagged_tlds": flagged,
+        "total_tlds_analyzed": len(tld_buckets),
+        "status": "threat_detected" if flagged else "clear",
+    }
+
+
+def _nullroute_spam_tld(tenant_id: str, tld: str) -> dict:
+    """Blacklist an anomalous TLD by upserting it into shared_threats."""
+    reason = f"Spamming Drive null-routed: TLD {tld} flagged for link-density anomaly"
+    indicator = f"tld:{tld}"
+    _upsert_shared_threat(
+        ip=indicator,
+        source_tenant=tenant_id,
+        category="spamming_drive",
+        risk=95,
+        reason=reason,
+        source="Email Sentinel",
+    )
+    return {"tld": tld, "action": "null_routed", "status": "blocked", "reason": reason}
+
+
+def _email_drive_status(tenant_id: str) -> dict:
+    """Return current email drive status: z-scores per TLD + messages in the current hourly bucket."""
+    detection = _detect_email_spam_drive(tenant_id)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM events
+                WHERE tenant_id=%s
+                  AND type='email_received'
+                  AND timestamp >= date_trunc('hour', NOW())
+                """,
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+    current_hour_total = int(row.get("cnt") or 0) if row else 0
+    return {
+        **detection,
+        "current_hour_msgs": current_hour_total,
+    }
+
+
+
 def _upsert_shared_threat(ip: str, source_tenant: str, category: str, risk: int, reason: str, source: str = "Sovereign Diplomat") -> None:
     """Promote a critical indicator into shared herd-immunity intelligence."""
     if not ip:
@@ -4220,11 +4339,38 @@ async def voice_command_endpoint(
             "z_score_meta": risk_result.get("z_score_meta", {}),
         }
 
+    elif command in (
+        "email_drive_status",
+        "status_of_the_current_email_drive",
+        "email_drive",
+        "current_email_drive",
+        "spam_drive_status",
+    ):
+        drive = _email_drive_status(tenant_id)
+        flagged = drive.get("flagged_tlds", [])
+        top = flagged[0] if flagged else None
+        if top:
+            reasoning = (
+                f"Spamming Drive detected on TLD {top['tld']}: "
+                f"z-score {top['z_score']} (link density {top['current_avg_link_density']} vs baseline mean {top['baseline_mean']}). "
+                f"{drive['current_hour_msgs']} messages in the current hourly bucket."
+            )
+        else:
+            reasoning = f"No active spamming drives detected. {drive['current_hour_msgs']} email messages in the current hourly bucket."
+        result = {
+            "command": "email_drive_status",
+            "intent": command,
+            "status": drive["status"],
+            "flagged_tlds": flagged,
+            "current_hour_msgs": drive["current_hour_msgs"],
+            "reasoning": [reasoning],
+        }
+
     else:
         result = {
             "command": command,
             "status": "unrecognized",
-            "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill, why_was_this_user_isolated, identify_highest_risk_user, lower_threshold_for_<tenant>_by_<percent>_percent",
+            "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill, why_was_this_user_isolated, identify_highest_risk_user, email_drive_status, lower_threshold_for_<tenant>_by_<percent>_percent",
         }
 
     result.setdefault("command", command)
@@ -4514,6 +4660,30 @@ def get_highest_risk_user(
 ):
     """Identify the highest-risk user based on z-score analysis across all event types."""
     return _identify_highest_risk_user(tenant_id)
+
+
+@app.get("/email/drive-status")
+def email_drive_status_endpoint(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Return the current email spamming drive status with Z-score analysis per TLD."""
+    return _email_drive_status(tenant_id)
+
+
+@app.post("/email/nullroute-tld")
+def nullroute_tld_endpoint(
+    tld: str,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Kill-switch: blacklist an anomalous TLD in the shared threat intel table."""
+    result = _nullroute_spam_tld(tenant_id, tld)
+    log_action(tenant_id, user.get("id"), "email.nullroute_tld", "shared_threats", {
+        "tld": tld,
+        "action": "null_routed",
+    })
+    return result
 
 
 # ---------------------------------------------------------------------------
