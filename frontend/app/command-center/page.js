@@ -1,5 +1,6 @@
 "use client";
 
+import axios from "axios";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import Timeline from "../../components/Timeline";
@@ -22,6 +23,10 @@ function getDefaultScheduleForm() {
     recipients: "",
     enabled: true,
   };
+}
+
+function deriveVoiceIntent(transcript) {
+  return transcript.toLowerCase().trim().replace(/\s+/g, "_");
 }
 
 export default function CommandCenterPage() {
@@ -115,6 +120,34 @@ export default function CommandCenterPage() {
     }),
     [tenantId, apiKey]
   );
+
+  const sovereign_pulse = useMemo(() => {
+    const baseline = incidentTimeline?.behavioral_baseline;
+    const points = baseline?.points || [];
+    if (!points.length) return null;
+
+    const width = 320;
+    const height = 72;
+    const padding = 8;
+    const max_count = Math.max(...points.map((point) => point.count), 1);
+    const step = points.length > 1 ? (width - padding * 2) / (points.length - 1) : 0;
+    const dots = points.map((point, index) => {
+      const x = padding + step * index;
+      const y = height - padding - (point.count / max_count) * (height - padding * 2);
+      const z_score = baseline?.z_scores?.[index] ?? 0;
+      const color = z_score > 3 ? "#ef4444" : z_score > 2 ? "#f59e0b" : "#14b8a6";
+      return { x, y, color, point, z_score };
+    });
+    const path = dots.map((dot, index) => `${index === 0 ? "M" : "L"}${dot.x},${dot.y}`).join(" ");
+
+    return {
+      width,
+      height,
+      path,
+      dots,
+      latest_z_score: baseline?.latest_z_score ?? 0,
+    };
+  }, [incidentTimeline]);
 
   useEffect(() => {
     if (useDemoMode) {
@@ -406,31 +439,40 @@ export default function CommandCenterPage() {
 
   // ── Voice Command System ────────────────────────────────────────
   function startVoiceListener() {
-    const SpeechRecognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!SpeechRecognition) {
+    const speech_recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+    if (!speech_recognition)
+    {
       setToast({ type: "error", message: "WebSpeech API not supported in this browser" });
       return;
     }
-    const recognition = new SpeechRecognition();
+    const recognition = new speech_recognition();
     recognition.continuous = true;
     recognition.interimResults = false;
     recognition.lang = "en-US";
     recognition.onresult = async (event) => {
-      const lastResult = event.results[event.results.length - 1];
-      if (!lastResult.isFinal) return;
-      const transcript = lastResult[0].transcript.trim();
+      const last_result = event.results[event.results.length - 1];
+      if (!last_result.isFinal) return;
+      const transcript = last_result[0].transcript.trim();
       setVoiceTranscript(transcript);
-      const normalized = transcript.toLowerCase().replace(/\s+/g, "_");
+      const intent = deriveVoiceIntent(transcript);
+      const confirm = /\b(confirm|confirmed|yes_apply)\b/i.test(transcript);
+      const target_match = intent.match(/lower_threshold_for_([a-z0-9\-_]+)_by_(\d+)_percent/);
+      const context_user = incidentTimeline?.behavioral_baseline?.user_id || incidentTimeline?.entity || null;
+      const voice_payload = {
+        intent,
+        confirm,
+        context_user,
+        target_tenant: target_match ? target_match[1] : null,
+        percent_delta: target_match ? Number.parseFloat(target_match[2]) : null,
+      };
       try {
-        const res = await fetch(`${API}/voice/command`, {
-          method: "POST",
+        const { data } = await axios.post(`${API}/voice/command`, voice_payload, {
           headers: authHeaders,
-          body: JSON.stringify({ command: normalized }),
         });
-        const data = await res.json();
         setVoiceResult(data);
-        if (data.status !== "unrecognized") {
-          setToast({ type: "success", message: `Voice: ${data.command} → ${data.status}` });
+        if (data.status !== "unrecognized")
+        {
+          setToast({ type: "success", message: `Voice: ${data.intent || data.command} → ${data.status}` });
           loadSoarPolicy();
         }
       } catch {
@@ -1622,11 +1664,44 @@ export default function CommandCenterPage() {
                 ) : null}
               </div>
             ) : null}
+
+            {incidentTimeline.behavioral_baseline?.points?.length ? (
+              <div style={{ ...miniCard, marginTop: 10, borderColor: "#14b8a6" }}>
+                <div style={{ ...miniTitle, marginBottom: 6 }}>Sovereign Pulse (Baseline Deviation)</div>
+                <div style={{ color: "#cbd5e1", fontSize: 12, marginBottom: 8 }}>
+                  User: {incidentTimeline.behavioral_baseline.user_id || "-"} | Mean: {incidentTimeline.behavioral_baseline.mean ?? "-"} | StdDev: {incidentTimeline.behavioral_baseline.stddev ?? "-"}
+                </div>
+                {sovereign_pulse ? (
+                  <>
+                    <svg viewBox={`0 0 ${sovereign_pulse.width} ${sovereign_pulse.height}`} style={{ width: "100%", height: 88, display: "block" }} role="img" aria-label="Sovereign Pulse baseline deviation sparkline">
+                      <path d={sovereign_pulse.path} fill="none" stroke="#38bdf8" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+                      {sovereign_pulse.dots.map((dot) => (
+                        <circle key={dot.point.day} cx={dot.x} cy={dot.y} r="4" fill={dot.color}>
+                          <title>{`${dot.point.day} | count=${dot.point.count} | z=${dot.z_score}`}</title>
+                        </circle>
+                      ))}
+                    </svg>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", color: "#94a3b8", fontSize: 11, marginTop: 6 }}>
+                      {incidentTimeline.behavioral_baseline.points.map((point, index) => (
+                        <span key={`${point.day}-${index}`}>{point.day.slice(5)}: {point.count}</span>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: 8, color: sovereign_pulse.latest_z_score > 3 ? "#ef4444" : sovereign_pulse.latest_z_score > 2 ? "#f59e0b" : "#6ee7b7", fontSize: 11 }}>
+                      Latest deviation z-score: {sovereign_pulse.latest_z_score}
+                    </div>
+                  </>
+                ) : null}
+                <div style={{ marginTop: 8, color: "#94a3b8", fontSize: 11 }}>
+                  Sentinel trigger threshold: z-score &gt; 3.0
+                </div>
+              </div>
+            ) : null}
+
             <ul style={{ ...list, marginTop: 10 }}>
               {(incidentTimeline.timeline || []).map((t, idx) => (
                 <li key={`${t.timestamp}-${idx}`} style={{ ...row, flexDirection: "column", gap: 2, paddingBottom: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-                    <span style={{ color: t.category === "soar" ? "#60a5fa" : t.category === "lifecycle" ? "#a78bfa" : "#94a3b8", fontSize: 12, fontWeight: 600 }}>
+                    <span style={{ color: t.category === "soar" ? "#60a5fa" : t.category === "lifecycle" ? "#a78bfa" : t.category === "threat_intel" ? "#f97316" : t.category === "sentinel" ? "#14b8a6" : "#94a3b8", fontSize: 12, fontWeight: 600 }}>
                       [{t.category?.toUpperCase() || "EVENT"}] {t.action}
                     </span>
                     <span style={{ color: "#64748b", fontSize: 11 }}>{t.timestamp?.slice(0, 16)}</span>
@@ -1639,6 +1714,20 @@ export default function CommandCenterPage() {
                       {t.playbook ? <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>{t.playbook}</span> : null}
                       {t.ghost_mode ? <span style={{ background: "#3b1f4e", color: "#c084fc", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>👻 Ghost</span> : null}
                       {t.jit_revoked ? <span style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 10, padding: "1px 8px", fontSize: 11 }}>⛔ JIT Revoked</span> : null}
+                    </div>
+                  ) : null}
+                  {t.category === "threat_intel" ? (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11 }}>
+                      {t.ip ? <span style={{ color: "#fda4af" }}>IP: {t.ip}</span> : null}
+                      {t.threat_category ? <span style={{ color: "#fdba74" }}>{t.threat_category}</span> : null}
+                      {t.shared_intelligence ? <span style={{ background: "#4c1d95", color: "#ddd6fe", borderRadius: 10, padding: "1px 8px" }}>Shared Intelligence</span> : null}
+                    </div>
+                  ) : null}
+                  {t.category === "sentinel" ? (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11 }}>
+                      <span style={{ color: "#5eead4" }}>z-score: {t.z_score ?? "-"}</span>
+                      {t.event_type ? <span style={{ color: "#99f6e4" }}>event: {t.event_type}</span> : null}
+                      <span style={{ background: "#042f2e", color: "#5eead4", borderRadius: 10, padding: "1px 8px" }}>Auto Ghost-Mode</span>
                     </div>
                   ) : null}
                 </li>
@@ -1914,7 +2003,7 @@ export default function CommandCenterPage() {
           {voiceTranscript && <p style={{ color: "#c084fc", fontSize: 13 }}>Last: &ldquo;{voiceTranscript}&rdquo;</p>}
           {voiceResult && (
             <div style={{ color: voiceResult.status === "unrecognized" ? "#f87171" : "#6ee7b7", fontSize: 13 }}>
-              {voiceResult.command} → {voiceResult.status} {voiceResult.detail ? `(${voiceResult.detail})` : ""}
+              {voiceResult.intent || voiceResult.command} → {voiceResult.status} {voiceResult.detail ? `(${voiceResult.detail})` : ""}
             </div>
           )}
         </section>
