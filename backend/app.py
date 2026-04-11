@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Header, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, ConfigDict, constr
+from pydantic import BaseModel, Field, ConfigDict, constr, model_validator
 import json
 import os
 import hmac
@@ -921,11 +921,21 @@ class SoarPolicyUpdateBody(BaseModel):
 
 
 class VoiceCommandBody(BaseModel):
-    command: str = Field(..., min_length=2, max_length=200)
+    command: str | None = Field(default=None, min_length=2, max_length=200)
+    intent: str | None = Field(default=None, min_length=2, max_length=200)
     context_user: str | None = Field(default=None, max_length=128)
     target_tenant: str | None = Field(default=None, max_length=128)
     percent_delta: float | None = Field(default=None, ge=0.1, le=100)
     confirm: bool = False
+
+    @model_validator(mode="after")
+    def validate_voice_input(self):
+        if not self.command and not self.intent:
+            raise ValueError("command or intent is required")
+        return self
+
+    def normalized_command(self) -> str:
+        return (self.intent or self.command or "").strip().lower().replace(" ", "_")
 
 
 class ThresholdUpdateBody(BaseModel):
@@ -3890,11 +3900,11 @@ def _latest_isolated_user(tenant_id: str) -> str | None:
                 SELECT resource
                 FROM audit_logs
                 WHERE tenant_id=%s
-                  AND action='jit.revoke'
+                  AND action = ANY(%s)
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """,
-                (tenant_id,),
+                (tenant_id, ["jit.revoke", "jit.session_revoked"]),
             )
             row = cur.fetchone()
     resource = (row or {}).get("resource") or ""
@@ -3914,7 +3924,7 @@ def _build_isolation_reasoning(tenant_id: str, user_id: str) -> list[str]:
                 WHERE tenant_id=%s
                   AND (
                     resource=%s
-                    OR action IN ('threat_intel.match', 'sentinel.baseline_deviation', 'soar.auto_playbook', 'jit.revoke')
+                                        OR action IN ('threat_intel.match', 'sentinel.baseline_deviation', 'soar.auto_playbook', 'jit.revoke', 'jit.session_revoked')
                   )
                 ORDER BY timestamp DESC
                 LIMIT 120
@@ -3926,7 +3936,7 @@ def _build_isolation_reasoning(tenant_id: str, user_id: str) -> list[str]:
     for row in rows:
         action = row.get("action") or ""
         meta = row.get("meta") or {}
-        if action == "jit.revoke":
+        if action in {"jit.revoke", "jit.session_revoked"}:
             r = meta.get("reason") or "automated response"
             reasons.append(f"JIT isolation triggered ({r})")
         elif action == "sentinel.baseline_deviation" and (meta.get("user_id") == user_id or not meta.get("user_id")):
@@ -3958,8 +3968,8 @@ async def voice_command_endpoint(
     user=Depends(require_action("respond")),
 ):
     """Process voice commands from the WebSpeech API frontend."""
-    command = body.command.strip().lower().replace(" ", "_")
-    result: dict = {"command": command, "status": "unknown"}
+    command = body.normalized_command()
+    result: dict = {"command": command, "intent": command, "status": "unknown"}
 
     if command in ("lock_down", "lockdown"):
         policy = _get_or_create_soar_policy(tenant_id)
@@ -4075,6 +4085,8 @@ async def voice_command_endpoint(
             "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill, why_was_this_user_isolated, lower_threshold_for_<tenant>_by_<percent>_percent",
         }
 
+    result.setdefault("command", command)
+    result.setdefault("intent", command)
     log_action(tenant_id, user["id"], "voice.command", "voice", {"command": command, "result_status": result.get("status")})
     return result
 

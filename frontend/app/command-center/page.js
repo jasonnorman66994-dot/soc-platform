@@ -1,5 +1,6 @@
 "use client";
 
+import axios from "axios";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import Timeline from "../../components/Timeline";
@@ -22,6 +23,10 @@ function getDefaultScheduleForm() {
     recipients: "",
     enabled: true,
   };
+}
+
+function deriveVoiceIntent(transcript) {
+  return transcript.toLowerCase().trim().replace(/\s+/g, "_");
 }
 
 export default function CommandCenterPage() {
@@ -115,6 +120,34 @@ export default function CommandCenterPage() {
     }),
     [tenantId, apiKey]
   );
+
+  const sovereign_pulse = useMemo(() => {
+    const baseline = incidentTimeline?.behavioral_baseline;
+    const points = baseline?.points || [];
+    if (!points.length) return null;
+
+    const width = 320;
+    const height = 72;
+    const padding = 8;
+    const max_count = Math.max(...points.map((point) => point.count), 1);
+    const step = points.length > 1 ? (width - padding * 2) / (points.length - 1) : 0;
+    const dots = points.map((point, index) => {
+      const x = padding + step * index;
+      const y = height - padding - (point.count / max_count) * (height - padding * 2);
+      const z_score = baseline?.z_scores?.[index] ?? 0;
+      const color = z_score > 3 ? "#ef4444" : z_score > 2 ? "#f59e0b" : "#14b8a6";
+      return { x, y, color, point, z_score };
+    });
+    const path = dots.map((dot, index) => `${index === 0 ? "M" : "L"}${dot.x},${dot.y}`).join(" ");
+
+    return {
+      width,
+      height,
+      path,
+      dots,
+      latest_z_score: baseline?.latest_z_score ?? 0,
+    };
+  }, [incidentTimeline]);
 
   useEffect(() => {
     if (useDemoMode) {
@@ -406,41 +439,40 @@ export default function CommandCenterPage() {
 
   // ── Voice Command System ────────────────────────────────────────
   function startVoiceListener() {
-    const SpeechRecognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!SpeechRecognition) {
+    const speech_recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+    if (!speech_recognition)
+    {
       setToast({ type: "error", message: "WebSpeech API not supported in this browser" });
       return;
     }
-    const recognition = new SpeechRecognition();
+    const recognition = new speech_recognition();
     recognition.continuous = true;
     recognition.interimResults = false;
     recognition.lang = "en-US";
     recognition.onresult = async (event) => {
-      const lastResult = event.results[event.results.length - 1];
-      if (!lastResult.isFinal) return;
-      const transcript = lastResult[0].transcript.trim();
+      const last_result = event.results[event.results.length - 1];
+      if (!last_result.isFinal) return;
+      const transcript = last_result[0].transcript.trim();
       setVoiceTranscript(transcript);
-      const normalized = transcript.toLowerCase().replace(/\s+/g, "_");
+      const intent = deriveVoiceIntent(transcript);
       const confirm = /\b(confirm|confirmed|yes_apply)\b/i.test(transcript);
-      const targetMatch = normalized.match(/lower_threshold_for_([a-z0-9\-_]+)_by_(\d+)_percent/);
-      const contextUser = incidentTimeline?.behavioral_baseline?.user_id || incidentTimeline?.entity || null;
-      const voicePayload = {
-        command: normalized,
+      const target_match = intent.match(/lower_threshold_for_([a-z0-9\-_]+)_by_(\d+)_percent/);
+      const context_user = incidentTimeline?.behavioral_baseline?.user_id || incidentTimeline?.entity || null;
+      const voice_payload = {
+        intent,
         confirm,
-        context_user: contextUser,
-        target_tenant: targetMatch ? targetMatch[1] : null,
-        percent_delta: targetMatch ? Number.parseFloat(targetMatch[2]) : null,
+        context_user,
+        target_tenant: target_match ? target_match[1] : null,
+        percent_delta: target_match ? Number.parseFloat(target_match[2]) : null,
       };
       try {
-        const res = await fetch(`${API}/voice/command`, {
-          method: "POST",
+        const { data } = await axios.post(`${API}/voice/command`, voice_payload, {
           headers: authHeaders,
-          body: JSON.stringify(voicePayload),
         });
-        const data = await res.json();
         setVoiceResult(data);
-        if (data.status !== "unrecognized") {
-          setToast({ type: "success", message: `Voice: ${data.command} → ${data.status}` });
+        if (data.status !== "unrecognized")
+        {
+          setToast({ type: "success", message: `Voice: ${data.intent || data.command} → ${data.status}` });
           loadSoarPolicy();
         }
       } catch {
@@ -1635,25 +1667,30 @@ export default function CommandCenterPage() {
 
             {incidentTimeline.behavioral_baseline?.points?.length ? (
               <div style={{ ...miniCard, marginTop: 10, borderColor: "#14b8a6" }}>
-                <div style={{ ...miniTitle, marginBottom: 6 }}>Behavioral Baseline (7-day)</div>
+                <div style={{ ...miniTitle, marginBottom: 6 }}>Sovereign Pulse (Baseline Deviation)</div>
                 <div style={{ color: "#cbd5e1", fontSize: 12, marginBottom: 8 }}>
                   User: {incidentTimeline.behavioral_baseline.user_id || "-"} | Mean: {incidentTimeline.behavioral_baseline.mean ?? "-"} | StdDev: {incidentTimeline.behavioral_baseline.stddev ?? "-"}
                 </div>
-                <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 120 }}>
-                  {incidentTimeline.behavioral_baseline.points.map((p, idx) => {
-                    const maxCount = Math.max(...incidentTimeline.behavioral_baseline.points.map((x) => x.count), 1);
-                    const h = Math.max(6, (p.count / maxCount) * 100);
-                    const z = incidentTimeline.behavioral_baseline.z_scores?.[idx] ?? 0;
-                    const color = z > 3 ? "#ef4444" : z > 2 ? "#f59e0b" : "#14b8a6";
-                    return (
-                      <div key={`${p.day}-${idx}`} title={`${p.day} | count=${p.count} | z=${z}`} style={{ flex: 1, minWidth: 24 }}>
-                        <div style={{ background: color, height: `${h}%`, borderRadius: "5px 5px 0 0" }} />
-                        <div style={{ color: "#64748b", fontSize: 10, marginTop: 4, textAlign: "center" }}>{p.day.slice(5)}</div>
-                        <div style={{ color, fontSize: 10, textAlign: "center" }}>z {z}</div>
-                      </div>
-                    );
-                  })}
-                </div>
+                {sovereign_pulse ? (
+                  <>
+                    <svg viewBox={`0 0 ${sovereign_pulse.width} ${sovereign_pulse.height}`} style={{ width: "100%", height: 88, display: "block" }} role="img" aria-label="Sovereign Pulse baseline deviation sparkline">
+                      <path d={sovereign_pulse.path} fill="none" stroke="#38bdf8" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+                      {sovereign_pulse.dots.map((dot) => (
+                        <circle key={dot.point.day} cx={dot.x} cy={dot.y} r="4" fill={dot.color}>
+                          <title>{`${dot.point.day} | count=${dot.point.count} | z=${dot.z_score}`}</title>
+                        </circle>
+                      ))}
+                    </svg>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", color: "#94a3b8", fontSize: 11, marginTop: 6 }}>
+                      {incidentTimeline.behavioral_baseline.points.map((point, index) => (
+                        <span key={`${point.day}-${index}`}>{point.day.slice(5)}: {point.count}</span>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: 8, color: sovereign_pulse.latest_z_score > 3 ? "#ef4444" : sovereign_pulse.latest_z_score > 2 ? "#f59e0b" : "#6ee7b7", fontSize: 11 }}>
+                      Latest deviation z-score: {sovereign_pulse.latest_z_score}
+                    </div>
+                  </>
+                ) : null}
                 <div style={{ marginTop: 8, color: "#94a3b8", fontSize: 11 }}>
                   Sentinel trigger threshold: z-score &gt; 3.0
                 </div>
@@ -1966,7 +2003,7 @@ export default function CommandCenterPage() {
           {voiceTranscript && <p style={{ color: "#c084fc", fontSize: 13 }}>Last: &ldquo;{voiceTranscript}&rdquo;</p>}
           {voiceResult && (
             <div style={{ color: voiceResult.status === "unrecognized" ? "#f87171" : "#6ee7b7", fontSize: 13 }}>
-              {voiceResult.command} → {voiceResult.status} {voiceResult.detail ? `(${voiceResult.detail})` : ""}
+              {voiceResult.intent || voiceResult.command} → {voiceResult.status} {voiceResult.detail ? `(${voiceResult.detail})` : ""}
             </div>
           )}
         </section>
