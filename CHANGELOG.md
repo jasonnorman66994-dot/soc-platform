@@ -23,6 +23,8 @@
 - Command Center adds a `Run Due Now` control to trigger due-schedule execution on demand and display summary results.
 - New endpoint `GET /api/admin/reports/schedules/summary` returns operational counters for schedule state (`total`, `enabled`, `paused`, `due`).
 - Command Center schedule panel now shows live summary counters for total, enabled, paused, and due-now schedules.
+- Added modular SOC scaffold directories for ingestion, detection, correlation, workers, frontend dashboard components, and infrastructure layers.
+- Added a runnable ingestion service prototype at `backend/ingestion/server.py` with `POST /ingest` and `GET /events`, wired to simple detection rules in `backend/detection/rules.py`.
 
 ### Changed
 
