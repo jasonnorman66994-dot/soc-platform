@@ -28,6 +28,8 @@
 - Added production SOC core components: Kafka producer (`backend/ingestion/producer.py`), stream worker (`backend/workers/consumer.py`), and SQLAlchemy storage layer (`backend/storage/*`).
 - Added production-ready API service at `backend/api/server.py` with event queue ingest and persisted events/alerts query endpoints.
 - Added dedicated phase-2 orchestration stack at `infrastructure/docker/docker-compose.yml` (API, worker, Kafka, Zookeeper, PostgreSQL, Redis).
+- Added deterministic correlation engine (`backend/correlation/engine.py`) that groups related alerts into persisted incidents.
+- Added incident persistence model (`soc_core_incidents`) and new API endpoints: `GET /incidents` and `GET /incidents/{id}`.
 
 ### Changed
 
