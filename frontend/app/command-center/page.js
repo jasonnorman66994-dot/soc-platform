@@ -50,6 +50,7 @@ export default function CommandCenterPage() {
   const [scheduleForm, setScheduleForm] = useState(getDefaultScheduleForm());
   const [editingScheduleId, setEditingScheduleId] = useState(null);
   const [scheduleRunSummary, setScheduleRunSummary] = useState("");
+  const [scheduleSummary, setScheduleSummary] = useState({ total: 0, enabled: 0, paused: 0, due: 0 });
 
   const authHeaders = useMemo(
     () => ({
@@ -338,7 +339,25 @@ export default function CommandCenterPage() {
       return;
     }
     setReportSchedules(data || []);
+    await loadScheduleSummary();
     setAdminError("");
+  }
+
+  async function loadScheduleSummary() {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/schedules/summary`, {
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return;
+    }
+    setScheduleSummary({
+      total: Number.isInteger(data?.total) ? data.total : 0,
+      enabled: Number.isInteger(data?.enabled) ? data.enabled : 0,
+      paused: Number.isInteger(data?.paused) ? data.paused : 0,
+      due: Number.isInteger(data?.due) ? data.due : 0,
+    });
   }
 
   async function createReportSchedule() {
@@ -656,6 +675,12 @@ export default function CommandCenterPage() {
             <button style={btnSecondary} onClick={runDueSchedulesNow}>Run Due Now</button>
           </div>
           {scheduleRunSummary ? <p style={{ marginBottom: 0, color: "#34d399" }}>{scheduleRunSummary}</p> : null}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 8, marginTop: 10 }}>
+            <div style={miniCard}><div style={miniTitle}>Total</div><div>{scheduleSummary.total}</div></div>
+            <div style={miniCard}><div style={miniTitle}>Enabled</div><div>{scheduleSummary.enabled}</div></div>
+            <div style={miniCard}><div style={miniTitle}>Paused</div><div>{scheduleSummary.paused}</div></div>
+            <div style={miniCard}><div style={miniTitle}>Due Now</div><div>{scheduleSummary.due}</div></div>
+          </div>
           {reportSchedules.length > 0 && (
             <div style={{ marginTop: 10 }}>
               <h5 style={{ margin: 0, marginBottom: 6, color: "#94a3b8" }}>Active Schedules:</h5>

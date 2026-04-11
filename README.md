@@ -226,6 +226,7 @@ Admin-only endpoints for managing automated board report export schedules:
 - **Update schedule**: `PATCH /api/admin/reports/schedules/{id}` — Partial update of schedule fields.
 - **Run schedule now**: `POST /api/admin/reports/schedules/{id}/run` — Executes the configured export immediately, updates `last_run`/`next_run`, and returns the generated report payload.
 - **List due schedules**: `GET /api/admin/reports/schedules/due` — Returns enabled schedules whose `next_run` is currently in the past (overdue).
+- **Schedule summary**: `GET /api/admin/reports/schedules/summary` — Returns operational counters (`total`, `enabled`, `paused`, `due`).
 - **Run due schedules now**: `POST /api/admin/reports/schedules/run-due` — Executes all currently due enabled schedules immediately and returns execution counts.
 - **Delete schedule**: `DELETE /api/admin/reports/schedules/{id}` — Removes schedule.
 
@@ -246,6 +247,7 @@ Command Center support:
 - `Load Board Report` and `Download Board Report` use parameter inputs and clamp to safe ranges.
 - Active schedules listed with edit, run-now, pause/resume toggle, and delete controls plus computed next-run visibility.
 - `Run Due Now` executes all currently due schedules on demand and displays a summary in the panel.
+- Schedule panel shows live counters for total, enabled, paused, and due-now schedules.
 
 ## Founder Assets
 
