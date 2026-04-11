@@ -905,19 +905,49 @@ class PlaybookPolicyPatch(BaseModel):
     enabled: bool | None = None
     min_risk: int | None = Field(default=None, ge=0, le=100)
     ml_risk_threshold: float | None = Field(default=None, ge=0, le=100)
+    deception_enabled: bool | None = None
 
 
 class SoarPolicyUpdateBody(BaseModel):
     auto_response_enabled: bool | None = None
     default_risk_threshold: int | None = Field(default=None, ge=0, le=100)
     ml_risk_threshold: float | None = Field(default=None, ge=0, le=100)
+    ghost_mode: bool | None = None
     playbooks: dict[str, PlaybookPolicyPatch] | None = None
     event_type_overrides: dict[str, str] | None = None
     pattern_overrides: dict[str, str] | None = None
 
 
+class VoiceCommandBody(BaseModel):
+    command: str = Field(..., min_length=2, max_length=200)
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# JIT (Just-In-Time) access — token revocation blacklist
+# ---------------------------------------------------------------------------
+_JIT_REVOKED_TOKENS: set[str] = set()  # in-memory set of revoked JTIs / user-IDs
+
+
+def jit_revoke_user_sessions(tenant_id: str, user_id: str, reason: str = "risk_spike"):
+    """Instantly revoke all active sessions for a user by blacklisting their user-id."""
+    _JIT_REVOKED_TOKENS.add(f"{tenant_id}:{user_id}")
+    log_action(tenant_id, None, "jit.session_revoked", f"users/{user_id}", {
+        "reason": reason,
+        "timestamp": now_utc().isoformat(),
+    })
+
+
+def is_jit_revoked(tenant_id: str, user_id: str) -> bool:
+    return f"{tenant_id}:{user_id}" in _JIT_REVOKED_TOKENS
+
+
+def jit_reinstate_user(tenant_id: str, user_id: str):
+    _JIT_REVOKED_TOKENS.discard(f"{tenant_id}:{user_id}")
+    log_action(tenant_id, None, "jit.session_reinstated", f"users/{user_id}", {})
 
 
 def _default_soar_policy() -> dict:
@@ -925,12 +955,13 @@ def _default_soar_policy() -> dict:
         "auto_response_enabled": AUTO_RESPONSE_ENABLED,
         "default_risk_threshold": AUTO_RESPONSE_RISK_THRESHOLD,
         "ml_risk_threshold": 5.0,
+        "ghost_mode": False,
         "playbooks": {
-            "account_takeover": {"enabled": True, "min_risk": 70, "ml_risk_threshold": 4.0},
-            "suspicious_ip": {"enabled": True, "min_risk": 80, "ml_risk_threshold": 5.0},
-            "phishing": {"enabled": True, "min_risk": 85, "ml_risk_threshold": 6.0},
-            "data_exfiltration": {"enabled": True, "min_risk": 75, "ml_risk_threshold": 5.0},
-            "generic_alert": {"enabled": False, "min_risk": 95, "ml_risk_threshold": 8.0},
+            "account_takeover": {"enabled": True, "min_risk": 70, "ml_risk_threshold": 4.0, "deception_enabled": False},
+            "suspicious_ip": {"enabled": True, "min_risk": 80, "ml_risk_threshold": 5.0, "deception_enabled": False},
+            "phishing": {"enabled": True, "min_risk": 85, "ml_risk_threshold": 6.0, "deception_enabled": False},
+            "data_exfiltration": {"enabled": True, "min_risk": 75, "ml_risk_threshold": 5.0, "deception_enabled": False},
+            "generic_alert": {"enabled": False, "min_risk": 95, "ml_risk_threshold": 8.0, "deception_enabled": False},
         },
         "event_type_overrides": {
             "data_exfil": "data_exfiltration",
@@ -977,10 +1008,12 @@ def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
         enabled = requested.get("enabled") if isinstance(requested.get("enabled"), bool) else base["enabled"]
         min_risk = requested.get("min_risk") if isinstance(requested.get("min_risk"), int) else base["min_risk"]
         pb_ml_thresh = requested.get("ml_risk_threshold") if isinstance(requested.get("ml_risk_threshold"), (int, float)) else base.get("ml_risk_threshold", ml_risk_threshold)
+        pb_deception = requested.get("deception_enabled") if isinstance(requested.get("deception_enabled"), bool) else base.get("deception_enabled", False)
         playbooks[name] = {
             "enabled": enabled,
             "min_risk": max(0, min(min_risk, 100)),
             "ml_risk_threshold": max(0.0, min(float(pb_ml_thresh), 100.0)),
+            "deception_enabled": pb_deception,
         }
 
     event_type_overrides = dict(default["event_type_overrides"])
@@ -995,10 +1028,15 @@ def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
             if isinstance(key, str) and isinstance(value, str) and value in VALID_PLAYBOOK_TYPES:
                 pattern_overrides[key] = value
 
+    ghost_mode = candidate.get("ghost_mode")
+    if not isinstance(ghost_mode, bool):
+        ghost_mode = default.get("ghost_mode", False)
+
     return {
         "auto_response_enabled": auto_response_enabled,
         "default_risk_threshold": default_risk_threshold,
         "ml_risk_threshold": ml_risk_threshold,
+        "ghost_mode": ghost_mode,
         "playbooks": playbooks,
         "event_type_overrides": event_type_overrides,
         "pattern_overrides": pattern_overrides,
@@ -1577,6 +1615,8 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
     if user["tenant_id"] != tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
+    if is_jit_revoked(tenant_id, user["id"]):
+        raise HTTPException(status_code=401, detail="Session revoked by JIT policy")
     return user
 
 
@@ -2644,6 +2684,11 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                 ml_risk_boost = int(min(15, round(_anom["z_score"] * 3.0)))
                 break
         risk_score = min(100, risk_score + ml_risk_boost)
+
+        # JIT auto-revocation: if risk spikes above 90, revoke the user's sessions
+        if risk_score >= 90 and event.user_id:
+            jit_revoke_user_sessions(tenant_id, event.user_id, reason="automated_risk_spike")
+
         active_soar_policy = _get_cached_soar_policy(tenant_id)
         selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
 
@@ -2713,7 +2758,24 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                 playbook_result = execute_playbook_for_incident(incident_payload, event_payload)
                 playbook_status = playbook_result.get("status", "unknown")
 
-                if playbook_status == "success":
+                # Ghost-mode deception for auto-response on critical/high incidents
+                _ghost_global = active_soar_policy.get("ghost_mode", False)
+                _pb_deception = (active_soar_policy.get("playbooks", {}).get(selected_playbook) or {}).get("deception_enabled", False)
+                if (_ghost_global or _pb_deception) and incident_row.get("severity") in ("critical", "high"):
+                    playbook_result["ghost_mode"] = True
+                    playbook_result["deception_status"] = "sandboxed"
+                    playbook_result["original_actions"] = playbook_result.get("actions", [])
+                    playbook_result["actions"] = [{"type": "sandbox_proxy", "detail": "Threat actor redirected to deception sandbox"}]
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE incidents SET status='sandboxed' WHERE id=%s AND tenant_id=%s",
+                                (incident_row["id"], tenant_id),
+                            )
+                        conn.commit()
+                    incident_row["status"] = "sandboxed"
+                    log_action(tenant_id, None, "soar.ghost_mode_activated", f"incidents/{incident_row['id']}", {"playbook": selected_playbook, "auto": True})
+                elif playbook_status == "success":
                     with get_conn() as conn:
                         with conn.cursor() as cur:
                             cur.execute(
@@ -3110,6 +3172,29 @@ def automate_incident_response(
     )
     result = execute_playbook_for_incident(incident_payload, event_payload)
 
+    # Ghost-mode deception: sandbox instead of hard lockout for critical incidents
+    ghost_mode_active = active_soar_policy.get("ghost_mode", False)
+    pb_deception = (active_soar_policy.get("playbooks", {}).get(selected_playbook) or {}).get("deception_enabled", False)
+    if (ghost_mode_active or pb_deception) and incident_row.get("severity") in ("critical", "high"):
+        result["ghost_mode"] = True
+        result["deception_status"] = "sandboxed"
+        result["original_actions"] = result.get("actions", [])
+        result["actions"] = [{"type": "sandbox_proxy", "detail": "Threat actor redirected to deception sandbox"}]
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE incidents SET status='sandboxed' WHERE id=%s AND tenant_id=%s",
+                    (incident_id, tenant_id),
+                )
+            conn.commit()
+        log_action(
+            tenant_id,
+            user["id"],
+            "soar.ghost_mode_activated",
+            f"incidents/{incident_id}",
+            {"playbook": selected_playbook, "severity": incident_row.get("severity")},
+        )
+
     log_response_action(incident_id, "manual_playbook", result.get("status", "unknown"), result)
     log_action(
         tenant_id,
@@ -3218,6 +3303,8 @@ def update_soar_policies(
         merged["default_risk_threshold"] = body.default_risk_threshold
     if body.ml_risk_threshold is not None:
         merged["ml_risk_threshold"] = body.ml_risk_threshold
+    if body.ghost_mode is not None:
+        merged["ghost_mode"] = body.ghost_mode
 
     if body.playbooks:
         for name, patch in body.playbooks.items():
@@ -3230,6 +3317,8 @@ def update_soar_policies(
                 target["min_risk"] = patch.min_risk
             if patch.ml_risk_threshold is not None:
                 target["ml_risk_threshold"] = patch.ml_risk_threshold
+            if patch.deception_enabled is not None:
+                target["deception_enabled"] = patch.deception_enabled
 
     if body.event_type_overrides is not None:
         merged["event_type_overrides"].clear()
@@ -3392,6 +3481,107 @@ def get_soar_stats(
         "active_monitored_users": active_users,
         "deflected_details": deflected_details[:20],
     }
+
+
+# ---------------------------------------------------------------------------
+# JIT Session Revocation Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/jit/revoke")
+def jit_revoke_endpoint(
+    target_user_id: str,
+    reason: str = "manual_revocation",
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Revoke all active sessions for a user via JIT policy."""
+    jit_revoke_user_sessions(tenant_id, target_user_id, reason)
+    log_action(tenant_id, user["id"], "jit.revoke", f"users/{target_user_id}", {"reason": reason})
+    return {"status": "revoked", "target_user_id": target_user_id, "reason": reason}
+
+
+@app.post("/jit/reinstate")
+def jit_reinstate_endpoint(
+    target_user_id: str,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Reinstate a previously JIT-revoked user."""
+    jit_reinstate_user(tenant_id, target_user_id)
+    log_action(tenant_id, user["id"], "jit.reinstate", f"users/{target_user_id}", {})
+    return {"status": "reinstated", "target_user_id": target_user_id}
+
+
+@app.get("/jit/status")
+def jit_status_endpoint(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """List all currently JIT-revoked sessions for this tenant."""
+    revoked = [uid for key, uid in ((k, k.split(":", 1)[-1]) for k in _JIT_REVOKED_TOKENS) if key.startswith(f"{tenant_id}:")]
+    return {"tenant_id": tenant_id, "revoked_users": revoked, "count": len(revoked)}
+
+
+# ---------------------------------------------------------------------------
+# Voice Command Endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/voice/command")
+async def voice_command_endpoint(
+    body: VoiceCommandBody,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Process voice commands from the WebSpeech API frontend."""
+    command = body.command.strip().lower().replace(" ", "_")
+    result: dict = {"command": command, "status": "unknown"}
+
+    if command in ("lock_down", "lockdown"):
+        # Set all playbook min_risk to 0 → maximum auto-response aggression
+        policy = _get_or_create_soar_policy(tenant_id)
+        for pb in policy.get("playbooks", {}).values():
+            pb["enabled"] = True
+            pb["min_risk"] = 0
+        policy["auto_response_enabled"] = True
+        _save_soar_policy(tenant_id, policy)
+        await broadcast(tenant_id, {"kind": "voice_command", "command": "lock_down", "status": "engaged"})
+        result = {"command": "lock_down", "status": "engaged", "detail": "All playbooks armed, min_risk zeroed"}
+
+    elif command in ("status_report", "status"):
+        policy = _get_or_create_soar_policy(tenant_id)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS cnt FROM incidents WHERE tenant_id=%s AND status IN ('open','investigating')",
+                    (tenant_id,),
+                )
+                open_count = (cur.fetchone() or {}).get("cnt", 0)
+        result = {
+            "command": "status_report",
+            "status": "ok",
+            "open_incidents": open_count,
+            "auto_response": policy.get("auto_response_enabled", False),
+            "ghost_mode": policy.get("ghost_mode", False),
+        }
+
+    elif command in ("enable_ghost_mode", "ghost_mode", "ghost"):
+        policy = _get_or_create_soar_policy(tenant_id)
+        policy["ghost_mode"] = True
+        _save_soar_policy(tenant_id, policy)
+        await broadcast(tenant_id, {"kind": "voice_command", "command": "enable_ghost_mode", "status": "active"})
+        result = {"command": "enable_ghost_mode", "status": "active", "detail": "Ghost-mode deception enabled globally"}
+
+    elif command in ("disable_ghost_mode", "disable_ghost"):
+        policy = _get_or_create_soar_policy(tenant_id)
+        policy["ghost_mode"] = False
+        _save_soar_policy(tenant_id, policy)
+        result = {"command": "disable_ghost_mode", "status": "disabled"}
+
+    else:
+        result = {"command": command, "status": "unrecognized", "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode"}
+
+    log_action(tenant_id, user["id"], "voice.command", "voice", {"command": command, "result_status": result.get("status")})
+    return result
 
 
 @app.put("/incidents/{incident_id}/status")
