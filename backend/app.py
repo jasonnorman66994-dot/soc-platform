@@ -1049,7 +1049,6 @@ def _get_shared_threat(ip: str | None) -> dict | None:
         "risk": int(row.get("risk") or 100),
         "tags": ["shared-intelligence", "diplomat"],
         "shared_intelligence": True,
-        "shared_source_tenant": row.get("source_tenant"),
         "reason": row.get("reason") or "critical threat propagated across tenants",
     }
 
@@ -1063,6 +1062,10 @@ def check_threat_intel(ip: str | None) -> dict | None:
         return shared
     feed = poll_threat_intel_feed()
     return feed.get(ip)
+
+
+_EVENT_FREQUENCY_CACHE: dict[tuple[str, str, str, str], tuple[float, dict, float]] = {}
+_EVENT_FREQUENCY_CACHE_TTL_SECONDS = 30.0
 
 
 def _safe_stddev(values: list[float]) -> float:
@@ -1114,6 +1117,12 @@ def _telemetry_frequency_zscore(tenant_id: str, user_id: str, event_type: str, n
 def _event_frequency_zscore(tenant_id: str, user_id: str, event_type: str) -> tuple[float, dict]:
     """Calculate z-score for events table hourly frequency against 7-day user baseline."""
     now_hour = now_utc().astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    cache_key = (tenant_id, user_id, event_type, now_hour.isoformat())
+    cached = _EVENT_FREQUENCY_CACHE.get(cache_key)
+    now_ts = now_utc().timestamp()
+    if cached and (now_ts - cached[2]) <= _EVENT_FREQUENCY_CACHE_TTL_SECONDS:
+        return cached[0], cached[1]
+
     baseline_map = {
         (now_hour - timedelta(hours=i)).isoformat(): 0
         for i in range(0, 168)
@@ -1148,10 +1157,14 @@ def _event_frequency_zscore(tenant_id: str, user_id: str, event_type: str) -> tu
     mean = sum(values) / len(values)
     stddev = _safe_stddev([float(v) for v in values])
     if stddev <= 0:
-        return 0.0, {"mean": mean, "stddev": stddev, "current": current, "sample_size": len(values)}
+        result = (0.0, {"mean": mean, "stddev": stddev, "current": current, "sample_size": len(values)})
+        _EVENT_FREQUENCY_CACHE[cache_key] = (result[0], result[1], now_ts)
+        return result
 
     z_score = (current - mean) / stddev
-    return z_score, {"mean": mean, "stddev": stddev, "current": current, "sample_size": len(values)}
+    result = (z_score, {"mean": mean, "stddev": stddev, "current": current, "sample_size": len(values)})
+    _EVENT_FREQUENCY_CACHE[cache_key] = (result[0], result[1], now_ts)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2970,6 +2983,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
             "source": _threat_match.get("source"),
             "category": _threat_match.get("category"),
             "tags": _threat_match.get("tags"),
+            "user_id": event.user_id,
             "shared_intelligence": bool(_threat_match.get("shared_intelligence")),
         })
         if int(_threat_match.get("risk") or 0) >= 90 and event.ip:
@@ -3924,12 +3938,14 @@ def _build_isolation_reasoning(tenant_id: str, user_id: str) -> list[str]:
                 WHERE tenant_id=%s
                   AND (
                     resource=%s
-                                        OR action IN ('threat_intel.match', 'sentinel.baseline_deviation', 'soar.auto_playbook', 'jit.revoke', 'jit.session_revoked')
+                                        OR (action='threat_intel.match' AND COALESCE(meta->>'user_id', '')=%s)
+                                        OR (action='sentinel.baseline_deviation' AND COALESCE(meta->>'user_id', '')=%s)
+                                        OR (action='soar.auto_playbook' AND (resource=%s OR COALESCE(meta->>'user_id', '')=%s))
                   )
                 ORDER BY timestamp DESC
                 LIMIT 120
                 """,
-                (tenant_id, f"users/{user_id}"),
+                                (tenant_id, f"users/{user_id}", user_id, user_id, f"users/{user_id}", user_id),
             )
             rows = cur.fetchall()
 
@@ -4317,7 +4333,6 @@ def get_threat_intel_feed(
             "risk": max(int(existing.get("risk") or 0), int(row.get("risk") or 100)),
             "tags": merged_tags,
             "shared_intelligence": True,
-            "shared_source_tenant": row.get("source_tenant"),
             "shared_reason": row.get("reason"),
         }
 
@@ -4530,24 +4545,34 @@ def _build_behavioral_baseline_graph(tenant_id: str, user_id: str | None) -> dic
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT date_trunc('day', timestamp) AS day_bucket, COUNT(*) AS cnt
-                FROM events
-                WHERE tenant_id=%s
-                  AND user_id=%s
-                  AND timestamp >= NOW() - INTERVAL '7 days'
-                GROUP BY day_bucket
-                ORDER BY day_bucket ASC
+                WITH day_buckets AS (
+                    SELECT generate_series(
+                        date_trunc('day', NOW()) - INTERVAL '6 days',
+                        date_trunc('day', NOW()),
+                        INTERVAL '1 day'
+                    ) AS day_bucket
+                ),
+                event_counts AS (
+                    SELECT date_trunc('day', timestamp) AS day_bucket, COUNT(*) AS cnt
+                    FROM events
+                    WHERE tenant_id=%s
+                      AND user_id=%s
+                      AND timestamp >= date_trunc('day', NOW()) - INTERVAL '6 days'
+                      AND timestamp < date_trunc('day', NOW()) + INTERVAL '1 day'
+                    GROUP BY date_trunc('day', timestamp)
+                )
+                SELECT db.day_bucket, COALESCE(ec.cnt, 0) AS cnt
+                FROM day_buckets db
+                LEFT JOIN event_counts ec ON ec.day_bucket = db.day_bucket
+                ORDER BY db.day_bucket ASC
                 """,
                 (tenant_id, user_id),
             )
             rows = cur.fetchall()
 
     counts = [int(r.get("cnt") or 0) for r in rows]
-    if not counts:
-        return {"user_id": user_id, "points": [], "z_scores": []}
-
-    mean = sum(counts) / len(counts)
-    stddev = _safe_stddev([float(v) for v in counts])
+    mean = sum(counts) / len(counts) if counts else 0.0
+    stddev = _safe_stddev([float(v) for v in counts]) if counts else 0.0
     points = []
     z_scores = []
     for r in rows:

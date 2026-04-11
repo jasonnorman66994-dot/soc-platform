@@ -2,6 +2,8 @@
 import { useEffect, useState, useCallback } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
+const MAX_THREAT_INDICATORS = 120;
+const ANIMATED_THREAT_INDICATORS = 60;
 
 export default function AuditDashboard() {
   const [stats, setStats] = useState(null);
@@ -25,7 +27,7 @@ export default function AuditDashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [statsRes, auditRes, jitRes, threatRes, agentsRes, drillsRes] = await Promise.all([
+      const [stats_result, audit_result, jit_result, threat_result, agents_result, drills_result] = await Promise.allSettled([
         fetch(`${API}/soar/stats?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${API}/soar/audit?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${API}/jit/status`, { headers: headers() }),
@@ -33,12 +35,12 @@ export default function AuditDashboard() {
         fetch(`${API}/agents/status`, { headers: headers() }),
         fetch(`${API}/drills/history`, { headers: headers() }),
       ]);
-      if (statsRes.ok) setStats(await statsRes.json());
-      if (auditRes.ok) setAudit(await auditRes.json());
-      if (jitRes.ok) setJitStatus(await jitRes.json());
-      if (threatRes.ok) setThreatFeed(await threatRes.json());
-      if (agentsRes.ok) setAgents(await agentsRes.json());
-      if (drillsRes.ok) setDrills(await drillsRes.json());
+      if (stats_result.status === "fulfilled" && stats_result.value.ok) setStats(await stats_result.value.json());
+      if (audit_result.status === "fulfilled" && audit_result.value.ok) setAudit(await audit_result.value.json());
+      if (jit_result.status === "fulfilled" && jit_result.value.ok) setJitStatus(await jit_result.value.json());
+      if (threat_result.status === "fulfilled" && threat_result.value.ok) setThreatFeed(await threat_result.value.json());
+      if (agents_result.status === "fulfilled" && agents_result.value.ok) setAgents(await agents_result.value.json());
+      if (drills_result.status === "fulfilled" && drills_result.value.ok) setDrills(await drills_result.value.json());
     } catch (e) {
       console.error("AuditDashboard load error:", e);
     } finally {
@@ -47,6 +49,9 @@ export default function AuditDashboard() {
   }, [headers, windowDays]);
 
   useEffect(() => { load(); }, [load]);
+
+  const threat_indicators = (threatFeed?.indicators || []).slice(0, MAX_THREAT_INDICATORS);
+  const animate_threat_indicators = threat_indicators.length <= ANIMATED_THREAT_INDICATORS;
 
   const card = { background: "#1e1e2e", borderRadius: 10, padding: 20, marginBottom: 16, border: "1px solid #333" };
   const kpi = { background: "#252540", borderRadius: 8, padding: 16, textAlign: "center", flex: 1, minWidth: 140 };
@@ -189,19 +194,20 @@ export default function AuditDashboard() {
               <ellipse cx="400" cy="200" rx="380" ry="120" fill="none" stroke="#5b5fc7" strokeWidth="0.5" />
             </svg>
             {/* Threat indicators plotted as pulsing dots */}
-            {threatFeed.indicators.map((ind, i) => {
+            {threat_indicators.map((ind) => {
               const hash = [...ind.ip].reduce((a, c) => a + c.charCodeAt(0), 0);
               const x = 10 + (hash * 7) % 80;
               const y = 10 + (hash * 13) % 80;
-              const riskColor = ind.risk >= 90 ? "#f44" : ind.risk >= 70 ? "#f90" : "#fa0";
+              const risk_color = ind.risk >= 90 ? "#f44" : ind.risk >= 70 ? "#f90" : "#fa0";
+              const indicator_key = `${ind.ip}:${ind.source || "global"}:${ind.category || "unknown"}`;
               return (
-                <div key={i} title={`${ind.ip} — ${ind.category} (risk: ${ind.risk})`}
+                <div key={indicator_key} title={`${ind.ip} — ${ind.category} (risk: ${ind.risk})`}
                   style={{
                     position: "absolute", left: `${x}%`, top: `${y}%`,
                     width: 12, height: 12, borderRadius: "50%",
-                    background: riskColor, opacity: 0.85,
-                    boxShadow: `0 0 8px ${riskColor}`,
-                    animation: "pulse 2s infinite",
+                    background: risk_color, opacity: 0.85,
+                    boxShadow: `0 0 8px ${risk_color}`,
+                    animation: animate_threat_indicators ? "pulse 2s infinite" : "none",
                     cursor: "pointer",
                     border: ind.shared_intelligence ? "2px solid #c084fc" : "none",
                   }}>
@@ -216,6 +222,9 @@ export default function AuditDashboard() {
               );
             })}
           </div>
+          <p style={{ color: "#888", fontSize: 11, marginTop: 10 }}>
+            Displaying top {threat_indicators.length} of {threatFeed.total || threat_indicators.length} indicators by risk.
+          </p>
           <style>{`@keyframes pulse { 0%,100% { transform: scale(1); opacity: 0.85; } 50% { transform: scale(1.4); opacity: 0.5; } }`}</style>
           <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 16 }}>
             <thead>
@@ -229,8 +238,10 @@ export default function AuditDashboard() {
               </tr>
             </thead>
             <tbody>
-              {threatFeed.indicators.map((ind, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid #2a2a3a" }}>
+              {threat_indicators.map((ind) => {
+                const indicator_key = `${ind.ip}:${ind.source || "global"}:${ind.category || "unknown"}`;
+                return (
+                <tr key={indicator_key} style={{ borderBottom: "1px solid #2a2a3a" }}>
                   <td style={{ padding: 8, color: "#faa", fontFamily: "monospace" }}>{ind.ip}</td>
                   <td style={{ padding: 8, color: "#ddf" }}>{ind.category}</td>
                   <td style={{ padding: 8, color: "#aac" }}>{ind.source}</td>
@@ -244,7 +255,7 @@ export default function AuditDashboard() {
                     )}
                   </td>
                 </tr>
-              ))}
+              )})}
             </tbody>
           </table>
         </div>
