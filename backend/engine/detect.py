@@ -151,30 +151,6 @@ def detect(event: dict, rules: list[dict] | None = None) -> list[dict]:
             }
         )
 
-    if event_type == "oauth_grant" and raw.get("untrusted_app"):
-        alerts.append(
-            {
-                "rule_id": "SIGMA-006",
-                "title": "Suspicious OAuth Application Consent",
-                "severity": "high",
-                "confidence": 86,
-                "mitre": "T1528",
-                "summary": "Untrusted OAuth app granted tenant-wide scope",
-            }
-        )
-
-    if event_type == "powershell_exec" and raw.get("encoded_command"):
-        alerts.append(
-            {
-                "rule_id": "SIGMA-007",
-                "title": "Encoded PowerShell Execution",
-                "severity": "critical",
-                "confidence": 93,
-                "mitre": "T1059.001",
-                "summary": "Potential post-exploitation PowerShell execution chain",
-            }
-        )
-
     if rules:
         _append_custom_rule_alerts(event, rules, alerts)
 

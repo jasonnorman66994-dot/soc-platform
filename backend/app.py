@@ -1903,14 +1903,15 @@ def get_events(
             except Exception:  # noqa: BLE001
                 raw = {}
         raw = raw or {}
+        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
         normalized.append(
             {
                 "id": row["id"],
                 "timestamp": row["timestamp"].isoformat(),
                 "event_type": row["type"],
                 "user": row.get("user_id"),
-                "ip": raw.get("ip"),
-                "location": raw.get("from") or raw.get("location"),
+                "ip": raw.get("ip") or payload_raw.get("ip"),
+                "location": raw.get("from") or raw.get("location") or payload_raw.get("from") or payload_raw.get("location"),
                 "raw": raw,
             }
         )
