@@ -82,6 +82,8 @@ export default function CommandCenterPage() {
   const [incidentTimeline, setIncidentTimeline] = useState(null);
   const [incidentTimelineLoading, setIncidentTimelineLoading] = useState(false);
   const [incidentTimelineId, setIncidentTimelineId] = useState("");
+  const [soarStats, setSoarStats] = useState(null);
+  const [soarStatsLoading, setSoarStatsLoading] = useState(false);
   const [liveSimulationStatus, setLiveSimulationStatus] = useState(null);
   const [liveSimulationForm, setLiveSimulationForm] = useState({ interval_seconds: 25, include_noise: true, rounds: 2 });
   const [executiveStory, setExecutiveStory] = useState(null);
@@ -299,12 +301,14 @@ export default function CommandCenterPage() {
         body: JSON.stringify({
           auto_response_enabled: !!soarPolicy.auto_response_enabled,
           default_risk_threshold: Number.parseInt(String(soarPolicy.default_risk_threshold || 0), 10),
+          ml_risk_threshold: Number.parseFloat(String(soarPolicy.ml_risk_threshold ?? 5)),
           playbooks: Object.fromEntries(
             Object.entries(soarPolicy.playbooks || {}).map(([name, conf]) => [
               name,
               {
                 enabled: !!conf?.enabled,
                 min_risk: Number.parseInt(String(conf?.min_risk || 0), 10),
+                ml_risk_threshold: Number.parseFloat(String(conf?.ml_risk_threshold ?? 5)),
               },
             ])
           ),
@@ -371,6 +375,25 @@ export default function CommandCenterPage() {
       setToast({ type: "error", message: "Failed to load incident timeline" });
     } finally {
       setIncidentTimelineLoading(false);
+    }
+  }
+
+  async function loadSoarStats() {
+    if (soarStatsLoading) return;
+    setSoarStatsLoading(true);
+    try {
+      const safe = Math.max(1, Math.min(Number.parseInt(soarAuditWindowDays || "30", 10) || 30, 90));
+      const res = await fetch(`${API}/soar/stats?window_days=${safe}`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to load SOAR stats" });
+        return;
+      }
+      setSoarStats(data);
+    } catch {
+      setToast({ type: "error", message: "Failed to load SOAR stats" });
+    } finally {
+      setSoarStatsLoading(false);
     }
   }
 
@@ -1426,6 +1449,42 @@ export default function CommandCenterPage() {
       </section>
 
       <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>SOAR Threat Intelligence Stats</h3>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button style={btn} onClick={loadSoarStats} disabled={soarStatsLoading}>
+            {soarStatsLoading ? "Loading..." : "Load SOAR Stats"}
+          </button>
+        </div>
+        {soarStats ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10, marginTop: 10 }}>
+              <div style={{ ...miniCard, borderColor: "#7c3aed" }}><div style={miniTitle}>Deflected Threats</div><div style={{ color: "#a78bfa", fontSize: 20, fontWeight: 700 }}>{soarStats.total_deflected_threats}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Total Executions</div><div style={{ fontSize: 20, fontWeight: 700 }}>{soarStats.total_executions}</div></div>
+              <div style={miniCard}><div style={miniTitle}>Success Rate</div><div style={{ color: "#22c55e", fontSize: 20, fontWeight: 700 }}>{soarStats.success_rate}%</div></div>
+              <div style={{ ...miniCard, borderColor: "#0ea5e9" }}><div style={miniTitle}>Active Monitored Users</div><div style={{ color: "#38bdf8", fontSize: 20, fontWeight: 700 }}>{soarStats.active_monitored_users}</div></div>
+            </div>
+            {soarStats.deflected_details?.length > 0 ? (
+              <div style={{ marginTop: 10 }}>
+                <h4 style={{ margin: 0, marginBottom: 6, color: "#cbd5e1" }}>Recent Deflections (ML Gate Blocks)</h4>
+                <ul style={list}>
+                  {soarStats.deflected_details.slice(0, 6).map((d, idx) => (
+                    <li key={idx} style={{ ...row, display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr 1fr", gap: 8 }}>
+                      <span style={{ textTransform: "capitalize" }}>{(d.playbook || "unknown").replaceAll("_", " ")}</span>
+                      <span style={{ color: "#94a3b8" }}>ML: {d.ml_anomaly_score != null ? d.ml_anomaly_score.toFixed(2) : "-"}</span>
+                      <span style={{ color: "#f59e0b" }}>Threshold: {d.ml_risk_threshold ?? "-"}</span>
+                      <span style={{ color: "#94a3b8" }}>Risk: {d.risk_score ?? "-"}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p style={{ color: "#94a3b8", marginBottom: 0, marginTop: 8 }}>Load SOAR stats to see deflected threats, success rate, and active users.</p>
+        )}
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
         <h3 style={h3}>Incident SOAR Timeline</h3>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 8 }}>
           <input
@@ -1448,6 +1507,24 @@ export default function CommandCenterPage() {
               <div style={miniCard}><div style={miniTitle}>Status</div><div>{incidentTimeline.status || "-"}</div></div>
               <div style={miniCard}><div style={miniTitle}>Timeline Events</div><div>{incidentTimeline.event_count}</div></div>
             </div>
+            {incidentTimeline.enriched_data ? (
+              <div style={{ ...miniCard, marginTop: 10, borderColor: "#0ea5e9", display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
+                {incidentTimeline.enriched_data.identity ? (
+                  <div>
+                    <div style={{ ...miniTitle, marginBottom: 4 }}>Identity Context</div>
+                    <div style={{ color: "#e2e8f0", fontSize: 13 }}>{incidentTimeline.enriched_data.identity.full_name || "-"}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 12 }}>{incidentTimeline.enriched_data.identity.department || "-"} — {incidentTimeline.enriched_data.identity.title || "-"}</div>
+                  </div>
+                ) : null}
+                {incidentTimeline.enriched_data.geo_ip ? (
+                  <div>
+                    <div style={{ ...miniTitle, marginBottom: 4 }}>Geo-IP Context</div>
+                    <div style={{ color: "#e2e8f0", fontSize: 13 }}>{incidentTimeline.enriched_data.geo_ip.city}, {incidentTimeline.enriched_data.geo_ip.country}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 12 }}>ISP: {incidentTimeline.enriched_data.geo_ip.isp || "-"} — IP: {incidentTimeline.enriched_data.geo_ip.ip || "-"}</div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <ul style={{ ...list, marginTop: 10 }}>
               {(incidentTimeline.timeline || []).map((t, idx) => (
                 <li key={`${t.timestamp}-${idx}`} style={{ ...row, flexDirection: "column", gap: 2, paddingBottom: 8 }}>
@@ -1503,11 +1580,25 @@ export default function CommandCenterPage() {
               <button style={btnSecondary} onClick={loadSoarPolicy}>Reload Policy</button>
             </div>
 
+            <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 12 }}>
+              <label style={{ color: "#cbd5e1", fontSize: 13, whiteSpace: "nowrap" }}>Global ML Risk Threshold:</label>
+              <input
+                type="range"
+                min="0"
+                max="20"
+                step="0.5"
+                value={soarPolicy.ml_risk_threshold ?? 5}
+                onChange={(e) => updateSoarPolicy(["ml_risk_threshold"], Number.parseFloat(e.target.value))}
+                style={{ flex: 1, accentColor: "#7c3aed" }}
+              />
+              <span style={{ color: "#a78bfa", fontWeight: 600, minWidth: 36 }}>{soarPolicy.ml_risk_threshold ?? 5}</span>
+            </div>
+
             <div style={{ marginTop: 10 }}>
               <h4 style={{ margin: 0, color: "#cbd5e1" }}>Per-Playbook Controls</h4>
               <ul style={{ ...list, marginTop: 8 }}>
                 {Object.entries(soarPolicy.playbooks || {}).map(([name, conf]) => (
-                  <li key={name} style={{ ...row, display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 8, alignItems: "center" }}>
+                  <li key={name} style={{ ...row, display: "grid", gridTemplateColumns: "1.3fr 0.8fr 0.8fr 1.4fr", gap: 8, alignItems: "center" }}>
                     <span style={{ textTransform: "capitalize" }}>{name.replaceAll("_", " ")}</span>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#cbd5e1" }}>
                       <input
@@ -1525,6 +1616,19 @@ export default function CommandCenterPage() {
                       value={conf?.min_risk ?? 85}
                       onChange={(e) => updateSoarPolicy(["playbooks", name, "min_risk"], Number.parseInt(e.target.value || "0", 10))}
                     />
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ color: "#94a3b8", fontSize: 11, whiteSpace: "nowrap" }}>ML Gate:</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="20"
+                        step="0.5"
+                        value={conf?.ml_risk_threshold ?? 5}
+                        onChange={(e) => updateSoarPolicy(["playbooks", name, "ml_risk_threshold"], Number.parseFloat(e.target.value))}
+                        style={{ flex: 1, accentColor: "#7c3aed" }}
+                      />
+                      <span style={{ color: "#a78bfa", fontSize: 12, minWidth: 24 }}>{conf?.ml_risk_threshold ?? 5}</span>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -1656,6 +1760,25 @@ export default function CommandCenterPage() {
           <span style={{ color: "#c4b5fd" }}>
             Risk score raised by +{ingestResult.ml_risk_boost} points because this user is a statistical outlier in recent event volume.
           </span>
+        </div>
+      ) : null}
+
+      {ingestResult?.enriched_data ? (
+        <div style={{ ...card, marginTop: 8, border: "1px solid #0ea5e9", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {ingestResult.enriched_data.identity ? (
+            <div>
+              <div style={{ color: "#38bdf8", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Identity</div>
+              <div style={{ color: "#e2e8f0", fontSize: 13 }}>{ingestResult.enriched_data.identity.full_name} — {ingestResult.enriched_data.identity.department}</div>
+              <div style={{ color: "#94a3b8", fontSize: 12 }}>{ingestResult.enriched_data.identity.title}</div>
+            </div>
+          ) : null}
+          {ingestResult.enriched_data.geo_ip ? (
+            <div>
+              <div style={{ color: "#38bdf8", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Geo-IP</div>
+              <div style={{ color: "#e2e8f0", fontSize: 13 }}>{ingestResult.enriched_data.geo_ip.city}, {ingestResult.enriched_data.geo_ip.country}</div>
+              <div style={{ color: "#94a3b8", fontSize: 12 }}>ISP: {ingestResult.enriched_data.geo_ip.isp}</div>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </main>

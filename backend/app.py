@@ -335,7 +335,10 @@ def _should_auto_respond(
     patterns: list[str],
     playbook_title: str,
     policy: dict | None = None,
-) -> bool:
+    ml_anomaly_score: float | None = None,
+    tenant_id: str | None = None,
+) -> bool | str:
+    """Return True to auto-respond, False to skip, or 'pending_review' for ML gate block."""
     active_policy = policy if isinstance(policy, dict) else _normalize_soar_policy(policy)
     if not AUTO_RESPONSE_ENABLED or not incident_row:
         return False
@@ -353,6 +356,31 @@ def _should_auto_respond(
     threshold = active_policy.get("default_risk_threshold", AUTO_RESPONSE_RISK_THRESHOLD)
     if isinstance(playbook_policy, dict) and isinstance(playbook_policy.get("min_risk"), int):
         threshold = playbook_policy.get("min_risk")
+
+    # ML anomaly gate: if ml_risk_threshold is set and ML score is below it, halt execution
+    ml_risk_threshold = None
+    if isinstance(playbook_policy, dict) and isinstance(playbook_policy.get("ml_risk_threshold"), (int, float)):
+        ml_risk_threshold = playbook_policy["ml_risk_threshold"]
+    elif isinstance(active_policy.get("ml_risk_threshold"), (int, float)):
+        ml_risk_threshold = active_policy["ml_risk_threshold"]
+
+    if ml_risk_threshold is not None and ml_anomaly_score is not None:
+        if ml_anomaly_score < ml_risk_threshold:
+            # Log deflection for audit
+            if tenant_id and incident_row:
+                log_action(
+                    tenant_id, None, "soar.deflected",
+                    f"incidents/{incident_row.get('id', 'unknown')}",
+                    {
+                        "reason": "ml_risk_below_threshold",
+                        "ml_anomaly_score": ml_anomaly_score,
+                        "ml_risk_threshold": ml_risk_threshold,
+                        "playbook": playbook_title,
+                        "risk_score": risk_score,
+                        "status": "Pending Manual Review",
+                    },
+                )
+            return "pending_review"
 
     if risk_score >= max(0, min(int(threshold), 100)):
         return True
@@ -389,6 +417,63 @@ def _build_playbook_inputs(
         "event_type": event_type,
     }
     return incident_payload, event_payload
+
+
+# ---------------------------------------------------------------------------
+# Incident context enrichment — Geo-IP + Identity metadata
+# ---------------------------------------------------------------------------
+_GEO_IP_DB: dict[str, dict] = {
+    "203.0.113.42": {"country": "RU", "city": "Moscow", "isp": "Evil Corp ISP", "latitude": 55.75, "longitude": 37.62},
+    "198.51.100.7": {"country": "CN", "city": "Shanghai", "isp": "ChinaNet", "latitude": 31.23, "longitude": 121.47},
+    "10.0.0.1": {"country": "US", "city": "Internal", "isp": "Private Network", "latitude": 37.77, "longitude": -122.42},
+    "192.168.1.1": {"country": "US", "city": "Internal", "isp": "Private Network", "latitude": 40.71, "longitude": -74.01},
+}
+
+_IDENTITY_DB: dict[str, dict] = {
+    "demo.user": {"full_name": "Alice Demo", "department": "Engineering", "title": "Senior Engineer", "manager": "Bob Manager"},
+    "admin": {"full_name": "Admin User", "department": "IT Operations", "title": "System Administrator", "manager": "CTO"},
+    "analyst": {"full_name": "Security Analyst", "department": "Security", "title": "SOC Analyst L2", "manager": "CISO"},
+}
+
+
+def enrich_incident_context(incident_row: dict | None, payload: dict | None = None) -> dict:
+    """Auto-fetch Geo-IP and Identity metadata for an incident."""
+    enriched: dict = {"geo_ip": None, "identity": None}
+    if not incident_row and not payload:
+        return enriched
+
+    # Resolve IP from incident entity or payload
+    ip = None
+    user_id = None
+    if payload:
+        ip = payload.get("ip")
+        user_id = payload.get("user_id")
+    if not ip and incident_row:
+        entity = incident_row.get("entity") or ""
+        # entity may itself be an IP
+        if entity and entity.count(".") == 3:
+            ip = entity
+    if not user_id and incident_row:
+        user_id = incident_row.get("entity")
+
+    # Geo-IP lookup (simulated)
+    if ip:
+        geo = _GEO_IP_DB.get(ip)
+        if geo:
+            enriched["geo_ip"] = {**geo, "ip": ip}
+        else:
+            # Default enrichment for unknown IPs
+            enriched["geo_ip"] = {"ip": ip, "country": "Unknown", "city": "Unknown", "isp": "Unknown"}
+
+    # Identity metadata lookup (simulated)
+    if user_id:
+        identity = _IDENTITY_DB.get(user_id)
+        if identity:
+            enriched["identity"] = {**identity, "user_id": user_id}
+        else:
+            enriched["identity"] = {"user_id": user_id, "full_name": user_id, "department": "Unknown", "title": "Unknown"}
+
+    return enriched
 
 
 def render_executive_story_markdown(report: dict) -> str:
@@ -819,11 +904,13 @@ class ReportScheduleResponse(BaseModel):
 class PlaybookPolicyPatch(BaseModel):
     enabled: bool | None = None
     min_risk: int | None = Field(default=None, ge=0, le=100)
+    ml_risk_threshold: float | None = Field(default=None, ge=0, le=100)
 
 
 class SoarPolicyUpdateBody(BaseModel):
     auto_response_enabled: bool | None = None
     default_risk_threshold: int | None = Field(default=None, ge=0, le=100)
+    ml_risk_threshold: float | None = Field(default=None, ge=0, le=100)
     playbooks: dict[str, PlaybookPolicyPatch] | None = None
     event_type_overrides: dict[str, str] | None = None
     pattern_overrides: dict[str, str] | None = None
@@ -837,12 +924,13 @@ def _default_soar_policy() -> dict:
     return {
         "auto_response_enabled": AUTO_RESPONSE_ENABLED,
         "default_risk_threshold": AUTO_RESPONSE_RISK_THRESHOLD,
+        "ml_risk_threshold": 5.0,
         "playbooks": {
-            "account_takeover": {"enabled": True, "min_risk": 70},
-            "suspicious_ip": {"enabled": True, "min_risk": 80},
-            "phishing": {"enabled": True, "min_risk": 85},
-            "data_exfiltration": {"enabled": True, "min_risk": 75},
-            "generic_alert": {"enabled": False, "min_risk": 95},
+            "account_takeover": {"enabled": True, "min_risk": 70, "ml_risk_threshold": 4.0},
+            "suspicious_ip": {"enabled": True, "min_risk": 80, "ml_risk_threshold": 5.0},
+            "phishing": {"enabled": True, "min_risk": 85, "ml_risk_threshold": 6.0},
+            "data_exfiltration": {"enabled": True, "min_risk": 75, "ml_risk_threshold": 5.0},
+            "generic_alert": {"enabled": False, "min_risk": 95, "ml_risk_threshold": 8.0},
         },
         "event_type_overrides": {
             "data_exfil": "data_exfiltration",
@@ -877,15 +965,22 @@ def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
         default_risk_threshold = default["default_risk_threshold"]
     default_risk_threshold = max(0, min(default_risk_threshold, 100))
 
+    ml_risk_threshold = candidate.get("ml_risk_threshold")
+    if not isinstance(ml_risk_threshold, (int, float)):
+        ml_risk_threshold = default["ml_risk_threshold"]
+    ml_risk_threshold = max(0.0, min(float(ml_risk_threshold), 100.0))
+
     playbooks_in = candidate.get("playbooks") if isinstance(candidate.get("playbooks"), dict) else {}
     playbooks = {}
     for name, base in default["playbooks"].items():
         requested = playbooks_in.get(name) if isinstance(playbooks_in.get(name), dict) else {}
         enabled = requested.get("enabled") if isinstance(requested.get("enabled"), bool) else base["enabled"]
         min_risk = requested.get("min_risk") if isinstance(requested.get("min_risk"), int) else base["min_risk"]
+        pb_ml_thresh = requested.get("ml_risk_threshold") if isinstance(requested.get("ml_risk_threshold"), (int, float)) else base.get("ml_risk_threshold", ml_risk_threshold)
         playbooks[name] = {
             "enabled": enabled,
             "min_risk": max(0, min(min_risk, 100)),
+            "ml_risk_threshold": max(0.0, min(float(pb_ml_thresh), 100.0)),
         }
 
     event_type_overrides = dict(default["event_type_overrides"])
@@ -903,6 +998,7 @@ def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
     return {
         "auto_response_enabled": auto_response_enabled,
         "default_risk_threshold": default_risk_threshold,
+        "ml_risk_threshold": ml_risk_threshold,
         "playbooks": playbooks,
         "event_type_overrides": event_type_overrides,
         "pattern_overrides": pattern_overrides,
@@ -2551,7 +2647,38 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
         active_soar_policy = _get_cached_soar_policy(tenant_id)
         selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
 
-        if _should_auto_respond(incident_row, risk_score, patterns, selected_playbook, active_soar_policy):
+        # Compute ML anomaly score for gate check
+        _ml_anomaly_score = None
+        for _anom in _ml_boost_result.get("anomalies", []):
+            if _anom.get("kind") == "user_activity_outlier" and _anom.get("user_id") == event.user_id:
+                _ml_anomaly_score = _anom.get("z_score", 0.0)
+                break
+
+        auto_respond_decision = _should_auto_respond(
+            incident_row, risk_score, patterns, selected_playbook, active_soar_policy,
+            ml_anomaly_score=_ml_anomaly_score, tenant_id=tenant_id,
+        )
+
+        if auto_respond_decision == "pending_review":
+            # ML gate blocked — set incident to pending_review status
+            if incident_row:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE incidents SET status='pending_review' WHERE id=%s AND tenant_id=%s",
+                            (incident_row["id"], tenant_id),
+                        )
+                    conn.commit()
+                incident_row["status"] = "pending_review"
+                await broadcast(tenant_id, {
+                    "kind": "soar_ml_gate_block",
+                    "incident_id": incident_row["id"],
+                    "ml_anomaly_score": _ml_anomaly_score,
+                    "playbook": selected_playbook,
+                    "status": "Pending Manual Review",
+                })
+
+        elif auto_respond_decision is True:
             # Atomically claim the incident for auto-response to prevent concurrent duplicates
             claimed_for_response = False
             previous_incident_status = (incident_row.get("status") or "open") if incident_row else "open"
@@ -2651,11 +2778,15 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
 
     log_action(tenant_id, None, "event.ingest", "events", {"event_id": saved_event["id"], "alerts": len(alert_rows)})
 
+    # Enrich incident with Geo-IP and Identity metadata
+    enriched_data = enrich_incident_context(incident_row, payload)
+
     return {
         "event": {"id": saved_event["id"], "timestamp": saved_event["timestamp"].isoformat(), **payload},
         "alerts": alert_rows,
         "incident": incident_row,
         "ml_risk_boost": ml_risk_boost,
+        "enriched_data": enriched_data,
     }
 
 
@@ -3085,6 +3216,8 @@ def update_soar_policies(
         merged["auto_response_enabled"] = body.auto_response_enabled
     if body.default_risk_threshold is not None:
         merged["default_risk_threshold"] = body.default_risk_threshold
+    if body.ml_risk_threshold is not None:
+        merged["ml_risk_threshold"] = body.ml_risk_threshold
 
     if body.playbooks:
         for name, patch in body.playbooks.items():
@@ -3095,6 +3228,8 @@ def update_soar_policies(
                 target["enabled"] = patch.enabled
             if patch.min_risk is not None:
                 target["min_risk"] = patch.min_risk
+            if patch.ml_risk_threshold is not None:
+                target["ml_risk_threshold"] = patch.ml_risk_threshold
 
     if body.event_type_overrides is not None:
         merged["event_type_overrides"].clear()
@@ -3183,6 +3318,79 @@ def get_soar_audit(
         "by_playbook": by_playbook,
         "daily_trend": [{"day": d, "count": c} for d, c in sorted(daily.items())],
         "recent_actions": recent,
+    }
+
+
+@app.get("/soar/stats")
+def get_soar_stats(
+    window_days: int = 30,
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Aggregated SOAR statistics: deflected threats, success rate, active monitored users."""
+    safe_window = max(1, min(window_days, 90))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # Total executions and deflections
+            cur.execute(
+                """
+                SELECT action, meta
+                FROM audit_logs
+                WHERE tenant_id=%s
+                  AND action LIKE 'soar.%%'
+                  AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY timestamp DESC
+                LIMIT 1000
+                """,
+                (tenant_id, safe_window),
+            )
+            soar_rows = cur.fetchall()
+
+            # Active monitored users (distinct entities from recent incidents)
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT entity) AS active_users
+                FROM incidents
+                WHERE tenant_id=%s
+                  AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                """,
+                (tenant_id, safe_window),
+            )
+            user_row = cur.fetchone()
+
+    total_executions = 0
+    total_successes = 0
+    total_deflected = 0
+    deflected_details: list[dict] = []
+
+    for r in soar_rows:
+        action = r.get("action") or ""
+        meta = r.get("meta") or {}
+        if action == "soar.deflected":
+            total_deflected += 1
+            deflected_details.append({
+                "reason": meta.get("reason"),
+                "playbook": meta.get("playbook"),
+                "ml_anomaly_score": meta.get("ml_anomaly_score"),
+                "ml_risk_threshold": meta.get("ml_risk_threshold"),
+                "risk_score": meta.get("risk_score"),
+            })
+        elif action.startswith("soar."):
+            total_executions += 1
+            if meta.get("status") == "success":
+                total_successes += 1
+
+    active_users = (user_row or {}).get("active_users", 0) if user_row else 0
+    success_rate = round(total_successes / total_executions * 100, 1) if total_executions else 0.0
+
+    return {
+        "tenant_id": tenant_id,
+        "window_days": safe_window,
+        "total_executions": total_executions,
+        "total_deflected_threats": total_deflected,
+        "success_rate": success_rate,
+        "active_monitored_users": active_users,
+        "deflected_details": deflected_details[:20],
     }
 
 
@@ -3352,11 +3560,15 @@ def get_incident_timeline(
 
     timeline.sort(key=lambda x: x.get("timestamp") or "")
 
+    # Enrich with Geo-IP and Identity context
+    enriched_data = enrich_incident_context(dict(incident), None)
+
     return {
         "incident_id": incident_id,
         "entity": incident.get("entity"),
         "status": incident.get("status"),
         "severity": incident.get("severity"),
+        "enriched_data": enriched_data,
         "timeline": timeline,
         "event_count": len(timeline),
     }
