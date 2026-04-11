@@ -30,6 +30,9 @@
 - Added dedicated phase-2 orchestration stack at `infrastructure/docker/docker-compose.yml` (API, worker, Kafka, Zookeeper, PostgreSQL, Redis).
 - Added deterministic correlation engine (`backend/correlation/engine.py`) that groups related alerts into persisted incidents.
 - Added incident persistence model (`soc_core_incidents`) and new API endpoints: `GET /incidents` and `GET /incidents/{id}`.
+- Added multi-event attack pattern module (`backend/correlation/patterns.py`) for sequence-based correlation.
+- Worker pipeline now combines baseline detections with timeline-based correlated alerts over a rolling 10-minute user window.
+- Added MITRE ATT&CK technique mappings on correlated alert payloads (for example account takeover and privilege escalation patterns).
 
 ### Changed
 
