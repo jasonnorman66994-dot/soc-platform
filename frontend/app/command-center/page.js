@@ -26,7 +26,28 @@ function getDefaultScheduleForm() {
 }
 
 function deriveVoiceIntent(transcript) {
-  return transcript.toLowerCase().trim().replace(/\s+/g, "_");
+  const lower = transcript.toLowerCase().trim();
+
+  const MULTI_INTENT_MAP = [
+    { patterns: [/highest\s*risk\s*user/, /identify.*risk.*user/, /who\s*is\s*(the\s*)?highest\s*risk/, /riskiest\s*user/], intent: "identify_highest_risk_user" },
+    { patterns: [/why\s*(was|is)\s*(this\s*)?user\s*isolated/, /explain\s*isolation/, /isolation\s*reason/], intent: "why_was_this_user_isolated" },
+    { patterns: [/lock\s*down/, /lockdown/, /engage\s*lockdown/], intent: "lock_down" },
+    { patterns: [/status\s*report/, /give\s*me\s*(a\s*)?status/, /system\s*status/], intent: "status_report" },
+    { patterns: [/enable\s*ghost\s*mode/, /activate\s*ghost/, /ghost\s*mode\s*on/], intent: "enable_ghost_mode" },
+    { patterns: [/disable\s*ghost\s*mode/, /ghost\s*mode\s*off/, /deactivate\s*ghost/], intent: "disable_ghost_mode" },
+    { patterns: [/run\s*(a\s*)?(security\s*)?drill/, /security\s*drill/, /start\s*drill/], intent: "run_security_drill" },
+    { patterns: [/lower\s*threshold/], intent: null },
+  ];
+
+  for (const { patterns, intent } of MULTI_INTENT_MAP) {
+    for (const pattern of patterns) {
+      if (pattern.test(lower)) {
+        return intent || lower.replace(/\s+/g, "_");
+      }
+    }
+  }
+
+  return lower.replace(/\s+/g, "_");
 }
 
 export default function CommandCenterPage() {
@@ -2004,6 +2025,17 @@ export default function CommandCenterPage() {
           {voiceResult && (
             <div style={{ color: voiceResult.status === "unrecognized" ? "#f87171" : "#6ee7b7", fontSize: 13 }}>
               {voiceResult.intent || voiceResult.command} → {voiceResult.status} {voiceResult.detail ? `(${voiceResult.detail})` : ""}
+            </div>
+          )}
+          {voiceResult?.reasoning && (
+            <div style={{ marginTop: 8, background: "#1e1b4b", borderRadius: 8, padding: 10, border: "1px solid #3730a3" }}>
+              <div style={{ color: "#a5b4fc", fontSize: 11, fontWeight: 600, marginBottom: 4 }}>AI Reasoning</div>
+              {voiceResult.target_user && <div style={{ color: "#e0e7ff", fontSize: 12, marginBottom: 4 }}>Target: <strong>{voiceResult.target_user}</strong>{voiceResult.max_z_score != null ? ` (z-score: ${voiceResult.max_z_score.toFixed(1)})` : ""}</div>}
+              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                {voiceResult.reasoning.map((r, i) => (
+                  <li key={i} style={{ color: "#c7d2fe", fontSize: 12, padding: "2px 0" }}>{r}</li>
+                ))}
+              </ul>
             </div>
           )}
         </section>

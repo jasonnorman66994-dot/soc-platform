@@ -999,6 +999,113 @@ def poll_threat_intel_feed() -> dict[str, dict]:
     return _THREAT_INTEL_FEED
 
 
+def _delete_shared_threat(ip: str, source_tenant: str, source: str = "Ghost Drill") -> None:
+    """Remove a temporary shared threat indicator created for a drill."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM shared_threats WHERE ip = %s AND source_tenant = %s AND source = %s",
+                    (ip, source_tenant, source),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def ghost_drill_propagate(source_tenant: str, target_tenant: str, ip: str, category: str = "ghost_drill_critical", risk: int = 100) -> dict:
+    """Ghost Drill: inject a test critical indicator and verify propagation in the shared feed."""
+    reason = f"Ghost drill injected from {source_tenant}"
+    _upsert_shared_threat(ip, source_tenant, category, risk, reason, source="Ghost Drill")
+    try:
+        shared_match = _get_shared_threat(ip)
+        target_match = shared_match if target_tenant == source_tenant else None
+        propagated = shared_match is not None
+        return {
+            "drill": "ghost_drill",
+            "source_tenant": source_tenant,
+            "target_tenant": target_tenant,
+            "ip": ip,
+            "risk": risk,
+            "category": category,
+            "propagated": propagated,
+            "target_blocklist_match": target_match,
+            "status": "pass" if propagated else "fail",
+        }
+    finally:
+        _delete_shared_threat(ip, source_tenant, source="Ghost Drill")
+
+
+def _identify_highest_risk_user(tenant_id: str) -> dict:
+    """Identify the user with the highest max z-score spike across event types."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    COALESCE(type, 'unknown') AS type,
+                    date_trunc('hour', timestamp) AS hour_bucket,
+                    COUNT(*) AS cnt
+                FROM events
+                WHERE tenant_id=%s
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                  AND user_id IS NOT NULL
+                GROUP BY user_id, COALESCE(type, 'unknown'), date_trunc('hour', timestamp)
+                ORDER BY user_id, type, hour_bucket
+                """,
+                (tenant_id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        return {"user_id": None, "max_z_score": 0.0, "explanation": "No users with activity in the last 7 days."}
+
+    hourly_counts: dict[str, dict[str, list[int]]] = {}
+    for row in rows:
+        uid = row.get("user_id")
+        etype = row.get("type") or "unknown"
+        cnt = int(row.get("cnt") or 0)
+        hourly_counts.setdefault(uid, {}).setdefault(etype, []).append(cnt)
+
+    best_user = None
+    best_z = -999.0
+    best_event_type = None
+    best_meta: dict = {}
+    for uid, event_buckets in hourly_counts.items():
+        for etype, counts in event_buckets.items():
+            if not counts:
+                continue
+            current = counts[-1]
+            baseline = counts[:-1] if len(counts) > 1 else counts
+            mean = sum(baseline) / len(baseline)
+            variance = sum((v - mean) ** 2 for v in baseline) / len(baseline)
+            stddev = variance ** 0.5
+            z = 0.0 if stddev == 0 else round((current - mean) / stddev, 2)
+            if z > best_z:
+                best_z = z
+                best_user = uid
+                best_event_type = etype
+                best_meta = {"current": current, "mean": round(mean, 2), "stddev": round(stddev, 2)}
+
+    explanation = (
+        f"User {best_user} is highest risk due to a {best_z:.1f} z-score spike "
+        f"in {best_event_type} (current: {best_meta.get('current', 0)}, "
+        f"mean: {best_meta.get('mean', 0):.1f}, stddev: {best_meta.get('stddev', 0):.2f})"
+    )
+
+    return {
+        "user_id": best_user,
+        "max_z_score": best_z,
+        "event_type": best_event_type,
+        "z_score_meta": best_meta,
+        "explanation": explanation,
+    }
+
+
 def _upsert_shared_threat(ip: str, source_tenant: str, category: str, risk: int, reason: str, source: str = "Sovereign Diplomat") -> None:
     """Promote a critical indicator into shared herd-immunity intelligence."""
     if not ip:
@@ -4094,11 +4201,30 @@ async def voice_command_endpoint(
                 "to_ml": new_ml,
             })
 
+    elif command in (
+        "identify_highest_risk_user",
+        "identify_the_highest_risk_user_and_explain_why",
+        "highest_risk_user",
+        "who_is_highest_risk",
+        "identify_the_highest_risk_user",
+    ):
+        risk_result = _identify_highest_risk_user(tenant_id)
+        result = {
+            "command": "identify_highest_risk_user",
+            "intent": command,
+            "status": "explained" if risk_result.get("user_id") else "no_data",
+            "target_user": risk_result.get("user_id"),
+            "max_z_score": risk_result.get("max_z_score", 0.0),
+            "event_type": risk_result.get("event_type"),
+            "reasoning": [risk_result.get("explanation", "No user activity data available.")],
+            "z_score_meta": risk_result.get("z_score_meta", {}),
+        }
+
     else:
         result = {
             "command": command,
             "status": "unrecognized",
-            "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill, why_was_this_user_isolated, lower_threshold_for_<tenant>_by_<percent>_percent",
+            "detail": "Valid commands: lock_down, status_report, enable_ghost_mode, disable_ghost_mode, run_security_drill, why_was_this_user_isolated, identify_highest_risk_user, lower_threshold_for_<tenant>_by_<percent>_percent",
         }
 
     result.setdefault("command", command)
@@ -4357,6 +4483,37 @@ def check_threat_intel_endpoint(
     if match:
         return {"ip": ip, "matched": True, **match}
     return {"ip": ip, "matched": False}
+
+
+@app.post("/threat-intel/ghost-drill")
+def ghost_drill_endpoint(
+    target_tenant: str = "tenant-b",
+    drill_ip: str = "10.255.255.1",
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    """Execute a Ghost Drill: mark a test IP as Critical, verify cross-tenant propagation."""
+    result = ghost_drill_propagate(
+        source_tenant=tenant_id,
+        target_tenant=target_tenant,
+        ip=drill_ip,
+    )
+    log_action(tenant_id, user.get("id"), "diplomat.ghost_drill", "shared_threats", {
+        "drill_ip": drill_ip,
+        "target_tenant": target_tenant,
+        "propagated": result["propagated"],
+        "status": result["status"],
+    })
+    return result
+
+
+@app.get("/risk/highest-user")
+def get_highest_risk_user(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("view_incidents")),
+):
+    """Identify the highest-risk user based on z-score analysis across all event types."""
+    return _identify_highest_risk_user(tenant_id)
 
 
 # ---------------------------------------------------------------------------

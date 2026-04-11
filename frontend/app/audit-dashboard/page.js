@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
 const MAX_THREAT_INDICATORS = 120;
@@ -12,6 +12,7 @@ export default function AuditDashboard() {
   const [threatFeed, setThreatFeed] = useState(null);
   const [agents, setAgents] = useState(null);
   const [drills, setDrills] = useState(null);
+  const [highestRisk, setHighestRisk] = useState(null);
   const [loading, setLoading] = useState(true);
   const [windowDays, setWindowDays] = useState(30);
 
@@ -27,13 +28,14 @@ export default function AuditDashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [stats_result, audit_result, jit_result, threat_result, agents_result, drills_result] = await Promise.allSettled([
+      const [stats_result, audit_result, jit_result, threat_result, agents_result, drills_result, risk_result] = await Promise.allSettled([
         fetch(`${API}/soar/stats?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${API}/soar/audit?window_days=${windowDays}`, { headers: headers() }),
         fetch(`${API}/jit/status`, { headers: headers() }),
         fetch(`${API}/threat-intel/feed`, { headers: headers() }),
         fetch(`${API}/agents/status`, { headers: headers() }),
         fetch(`${API}/drills/history`, { headers: headers() }),
+        fetch(`${API}/risk/highest-user`, { headers: headers() }),
       ]);
       if (stats_result.status === "fulfilled" && stats_result.value.ok) setStats(await stats_result.value.json());
       if (audit_result.status === "fulfilled" && audit_result.value.ok) setAudit(await audit_result.value.json());
@@ -41,6 +43,7 @@ export default function AuditDashboard() {
       if (threat_result.status === "fulfilled" && threat_result.value.ok) setThreatFeed(await threat_result.value.json());
       if (agents_result.status === "fulfilled" && agents_result.value.ok) setAgents(await agents_result.value.json());
       if (drills_result.status === "fulfilled" && drills_result.value.ok) setDrills(await drills_result.value.json());
+      if (risk_result.status === "fulfilled" && risk_result.value.ok) setHighestRisk(await risk_result.value.json());
     } catch (e) {
       console.error("AuditDashboard load error:", e);
     } finally {
@@ -52,6 +55,31 @@ export default function AuditDashboard() {
 
   const threat_indicators = (threatFeed?.indicators || []).slice(0, MAX_THREAT_INDICATORS);
   const animate_threat_indicators = threat_indicators.length <= ANIMATED_THREAT_INDICATORS;
+
+  const sovereign_pulse = useMemo(() => {
+    const trend = audit?.daily_trend || [];
+    if (trend.length < 2) return null;
+    const width = 320;
+    const height = 72;
+    const padding = 8;
+    const counts = trend.map(d => d.count);
+    const max_count = Math.max(...counts, 1);
+    const mean = counts.reduce((s, v) => s + v, 0) / counts.length;
+    const variance = counts.reduce((s, v) => s + (v - mean) ** 2, 0) / counts.length;
+    const stddev = Math.sqrt(variance) || 1;
+    const step = (width - padding * 2) / (trend.length - 1);
+    const dots = trend.map((d, i) => {
+      const x = padding + step * i;
+      const y = height - padding - (d.count / max_count) * (height - padding * 2);
+      const z = (d.count - mean) / stddev;
+      const color = z > 3 ? "#ef4444" : z > 2 ? "#f59e0b" : "#14b8a6";
+      const deviation_pct = mean > 0 ? Math.round(((d.count - mean) / mean) * 100) : 0;
+      return { x, y, color, z: Math.round(z * 100) / 100, day: d.day, count: d.count, deviation_pct };
+    });
+    const path = dots.map((dot, i) => `${i === 0 ? "M" : "L"}${dot.x},${dot.y}`).join(" ");
+    const latest = dots[dots.length - 1];
+    return { width, height, path, dots, latest_z_score: latest?.z ?? 0, latest_deviation_pct: latest?.deviation_pct ?? 0, mean: Math.round(mean * 10) / 10, stddev: Math.round(stddev * 10) / 10 };
+  }, [audit]);
 
   const card = { background: "#1e1e2e", borderRadius: 10, padding: 20, marginBottom: 16, border: "1px solid #333" };
   const kpi = { background: "#252540", borderRadius: 8, padding: 16, textAlign: "center", flex: 1, minWidth: 140 };
@@ -82,6 +110,84 @@ export default function AuditDashboard() {
           <div style={kpi}><div style={label}>Deflected Threats</div><div style={value}>{stats.total_deflected_threats}</div></div>
           <div style={kpi}><div style={label}>Success Rate</div><div style={value}>{stats.success_rate}%</div></div>
           <div style={kpi}><div style={label}>Monitored Users</div><div style={value}>{stats.active_monitored_users}</div></div>
+        </div>
+      )}
+
+      {/* Sovereign Pulse — System Health Sparkline */}
+      {sovereign_pulse && (
+        <div style={{ ...card, border: "1px solid #1e3a5f" }}>
+          <h2 style={h2}>Sovereign Pulse</h2>
+          <p style={{ color: "#888", fontSize: 12, marginBottom: 8 }}>Visual heartbeat of system health — daily execution deviation from baseline</p>
+          <svg viewBox={`0 0 ${sovereign_pulse.width} ${sovereign_pulse.height}`} style={{ width: "100%", height: 88, display: "block" }} role="img" aria-label="Sovereign Pulse sparkline">
+            <path d={sovereign_pulse.path} fill="none" stroke="#38bdf8" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+            {sovereign_pulse.dots.map((dot) => (
+              <circle key={dot.day} cx={dot.x} cy={dot.y} r={5} fill={dot.color} stroke="#0f172a" strokeWidth="2">
+                <title>{dot.day}: {dot.count} events (z={dot.z}, {dot.deviation_pct > 0 ? "+" : ""}{dot.deviation_pct}%)</title>
+              </circle>
+            ))}
+          </svg>
+          <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ color: sovereign_pulse.latest_z_score > 3 ? "#ef4444" : sovereign_pulse.latest_z_score > 2 ? "#f59e0b" : "#6ee7b7", fontSize: 11 }}>
+              Latest z-score: {sovereign_pulse.latest_z_score}
+            </div>
+            <span style={{ background: "#1e293b", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#94a3b8" }}>
+              Mean: {sovereign_pulse.mean}
+            </span>
+            <span style={{ background: "#1e293b", borderRadius: 12, padding: "2px 10px", fontSize: 11, color: "#94a3b8" }}>
+              Stddev: {sovereign_pulse.stddev}
+            </span>
+            <span style={{
+              background: Math.abs(sovereign_pulse.latest_deviation_pct) > 50 ? "#7f1d1d" : Math.abs(sovereign_pulse.latest_deviation_pct) > 25 ? "#78350f" : "#14532d",
+              borderRadius: 12, padding: "2px 10px", fontSize: 11, fontWeight: 600,
+              color: Math.abs(sovereign_pulse.latest_deviation_pct) > 50 ? "#fca5a5" : Math.abs(sovereign_pulse.latest_deviation_pct) > 25 ? "#fde68a" : "#86efac",
+            }}>
+              Baseline Deviation: {sovereign_pulse.latest_deviation_pct > 0 ? "+" : ""}{sovereign_pulse.latest_deviation_pct}%
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Context Badges */}
+      {(highestRisk || jitStatus || stats) && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+          {highestRisk?.user_id && (
+            <div style={{ background: "#3b0764", border: "1px solid #7c3aed", borderRadius: 10, padding: "8px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "#c4b5fd" }}>Highest Risk User</span>
+              <strong style={{ color: "#f5f3ff", fontSize: 13 }}>{highestRisk.user_id}</strong>
+              <span style={{
+                background: highestRisk.max_z_score > 3 ? "#7f1d1d" : highestRisk.max_z_score > 2 ? "#78350f" : "#14532d",
+                color: highestRisk.max_z_score > 3 ? "#fca5a5" : highestRisk.max_z_score > 2 ? "#fde68a" : "#86efac",
+                borderRadius: 12, padding: "1px 8px", fontSize: 11, fontWeight: 600,
+              }}>
+                z={highestRisk.max_z_score?.toFixed(1)} ({highestRisk.event_type})
+              </span>
+              {highestRisk.z_score_meta?.mean > 0 && (
+                <span style={{
+                  background: "#1e293b", borderRadius: 12, padding: "1px 8px", fontSize: 10, color: "#94a3b8",
+                }}>
+                  Baseline Deviation: {Math.round(((highestRisk.z_score_meta.current - highestRisk.z_score_meta.mean) / highestRisk.z_score_meta.mean) * 100)}%
+                </span>
+              )}
+            </div>
+          )}
+          {jitStatus && jitStatus.count > 0 && (
+            <div style={{ background: "#450a0a", border: "1px solid #dc2626", borderRadius: 10, padding: "8px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "#fca5a5" }}>JIT Revoked</span>
+              <strong style={{ color: "#fef2f2", fontSize: 13 }}>{jitStatus.count}</strong>
+            </div>
+          )}
+          {stats && (
+            <div style={{ background: "#052e16", border: "1px solid #16a34a", borderRadius: 10, padding: "8px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "#86efac" }}>Deflection Rate</span>
+              <strong style={{ color: "#f0fdf4", fontSize: 13 }}>{stats.success_rate}%</strong>
+            </div>
+          )}
+          {threatFeed && (
+            <div style={{ background: "#1e1b4b", border: "1px solid #6366f1", borderRadius: 10, padding: "8px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "#a5b4fc" }}>Shared Intel</span>
+              <strong style={{ color: "#eef2ff", fontSize: 13 }}>{threatFeed.shared_count || 0}</strong>
+            </div>
+          )}
         </div>
       )}
 
