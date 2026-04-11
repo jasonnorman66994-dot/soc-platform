@@ -3,10 +3,13 @@ import os
 from datetime import datetime, timezone
 
 from kafka import KafkaConsumer
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
 
+from correlation.engine import build_incident
 from detection.rules import detect
 from storage.db import SessionLocal, engine
-from storage.models import Alert, Base, Event
+from storage.models import Alert, Base, Event, Incident
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_LOGS_TOPIC = os.getenv("KAFKA_LOGS_TOPIC", "logs")
@@ -57,6 +60,24 @@ def run() -> None:
                         alert_type=item.get("type", "detection"),
                         severity=item.get("severity", "medium"),
                         details=item,
+                    )
+                )
+
+            incident_payload = build_incident(event, alerts)
+            if incident_payload is not None:
+                upsert_incident = insert(Incident).values(**incident_payload)
+                db.execute(
+                    upsert_incident.on_conflict_do_update(
+                        index_elements=[Incident.fingerprint],
+                        set_={
+                            "last_seen": func.greatest(Incident.last_seen, incident_payload["last_seen"]),
+                            "event_count": Incident.event_count + 1,
+                            "alert_count": Incident.alert_count + len(alerts),
+                            "severity": incident_payload["severity"],
+                            "description": incident_payload["description"],
+                            "context": incident_payload["context"],
+                            "updated_at": datetime.now(timezone.utc),
+                        },
                     )
                 )
 

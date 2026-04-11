@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from ingestion.producer import send_event
 from storage.db import SessionLocal
-from storage.models import Alert, Event
+from storage.models import Alert, Event, Incident
 
 app = FastAPI(title="SOC Core API", version="0.2.0")
 
@@ -72,3 +72,51 @@ def get_alerts(limit: int = 200):
             }
             for row in rows
         ]
+
+
+@app.get("/incidents")
+def get_incidents(limit: int = 200):
+    safe_limit = max(1, min(limit, 1000))
+    with SessionLocal() as db:
+        rows = db.query(Incident).order_by(Incident.last_seen.desc()).limit(safe_limit).all()
+        return [
+            {
+                "id": row.id,
+                "fingerprint": row.fingerprint,
+                "status": row.status,
+                "severity": row.severity,
+                "title": row.title,
+                "description": row.description,
+                "first_seen": row.first_seen.isoformat(),
+                "last_seen": row.last_seen.isoformat(),
+                "event_count": row.event_count,
+                "alert_count": row.alert_count,
+                "context": row.context,
+                "created_at": row.created_at.isoformat(),
+                "updated_at": row.updated_at.isoformat(),
+            }
+            for row in rows
+        ]
+
+
+@app.get("/incidents/{incident_id}")
+def get_incident(incident_id: int):
+    with SessionLocal() as db:
+        row = db.query(Incident).filter(Incident.id == incident_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        return {
+            "id": row.id,
+            "fingerprint": row.fingerprint,
+            "status": row.status,
+            "severity": row.severity,
+            "title": row.title,
+            "description": row.description,
+            "first_seen": row.first_seen.isoformat(),
+            "last_seen": row.last_seen.isoformat(),
+            "event_count": row.event_count,
+            "alert_count": row.alert_count,
+            "context": row.context,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+        }
