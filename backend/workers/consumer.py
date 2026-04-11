@@ -6,6 +6,7 @@ from kafka import KafkaConsumer
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 
+from api.realtime import publish_alert_update
 from correlation.engine import build_incident, correlate
 from detection.rules import detect
 from storage.db import SessionLocal, engine
@@ -115,6 +116,17 @@ def run() -> None:
                 )
 
             db.commit()
+
+        try:
+            publish_alert_update(
+                event=event,
+                alerts=alerts,
+                baseline_alerts=baseline_alerts,
+                correlated_alerts=correlated_alerts,
+            )
+        except Exception:
+            # Real-time streaming failures should not block ingestion and persistence.
+            continue
 
 
 if __name__ == "__main__":

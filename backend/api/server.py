@@ -1,13 +1,20 @@
 from datetime import datetime
+import asyncio
+import json
+import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+import redis.asyncio as redis_async
 
 from ingestion.producer import send_event
 from storage.db import SessionLocal
 from storage.models import Alert, Event, Incident
 
 app = FastAPI(title="SOC Core API", version="0.2.0")
+
+SOC_CORE_REDIS_URL = os.getenv("SOC_CORE_REDIS_URL", "redis://redis:6379/0")
+SOC_CORE_REALTIME_CHANNEL = os.getenv("SOC_CORE_REALTIME_CHANNEL", "soc-core:alerts")
 
 
 class LogEvent(BaseModel):
@@ -33,6 +40,31 @@ def ingest(event: LogEvent):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"Failed to queue event: {exc}")
     return {"status": "queued"}
+
+
+@app.websocket("/ws/alerts")
+async def ws_alerts(websocket: WebSocket):
+    await websocket.accept()
+    redis_client = redis_async.from_url(SOC_CORE_REDIS_URL, decode_responses=True)
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(SOC_CORE_REALTIME_CHANNEL)
+
+    try:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
+            if message and message.get("type") == "message":
+                raw = message.get("data")
+                if isinstance(raw, str):
+                    await websocket.send_text(raw)
+                else:
+                    await websocket.send_text(json.dumps(raw))
+            await asyncio.sleep(0.05)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await pubsub.unsubscribe(SOC_CORE_REALTIME_CHANNEL)
+        await pubsub.close()
+        await redis_client.close()
 
 
 @app.get("/events")
