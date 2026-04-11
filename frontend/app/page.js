@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import axios from "axios";
 
 export default function HomePage() {
   const [lead, setLead] = useState({ company: "", email: "", role: "security_lead" });
@@ -10,11 +11,11 @@ export default function HomePage() {
 
   async function trackEvent(eventName, meta = {}) {
     try {
-      await fetch("/api/public/analytics", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ event_name: eventName, page: "/", meta }),
-      });
+      await axios.post(
+        "/api/public/analytics",
+        { event_name: eventName, page: "/", meta },
+        { headers: { "Content-Type": "application/json" } }
+      );
     } catch {
       // Do not interrupt UX for analytics errors.
     }
@@ -28,35 +29,40 @@ export default function HomePage() {
     setLeadState("loading");
     setLeadMessage("");
     try {
-      const res = await fetch("/api/public/waitlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...lead, source: "landing" }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail || "Could not capture lead");
+      await axios.post(
+        "/api/public/waitlist",
+        { ...lead, source: "landing" },
+        { headers: { "Content-Type": "application/json" } }
+      );
       setLeadState("success");
       trackEvent("lead_submitted", { source: "landing" });
       setLeadMessage("Thanks. Your team is now on the launch list.");
       setLead({ company: "", email: "", role: "security_lead" });
     } catch (err) {
       setLeadState("error");
-      setLeadMessage(err.message || "Submission failed");
+      if(axios.isAxiosError(err))
+      {
+        setLeadMessage(err.response?.data?.detail || err.message || "Submission failed");
+      }
+      else
+      {
+        setLeadMessage(err.message || "Submission failed");
+      }
     }
   }
 
   return (
     <main style={page}>
-      <div style={glowA} />
-      <div style={glowB} />
+      <div style={glow_a} />
+      <div style={glow_b} />
 
       <header style={header}>
         <div style={logo}>NEXUS SOC</div>
         <nav style={nav}>
-          <a href="#platform" style={navLink}>Platform</a>
-          <a href="#pricing" style={navLink} onClick={() => trackEvent("pricing_section_click", { location: "nav" })}>Pricing</a>
-          <a href="#proof" style={navLink}>Proof</a>
-          <Link href="/command-center" style={ctaGhost} onClick={() => trackEvent("cta_live_demo_click", { location: "nav" })}>Live Demo</Link>
+          <a href="#platform" style={nav_link}>Platform</a>
+          <a href="#pricing" style={nav_link} onClick={() => trackEvent("pricing_section_click", { location: "nav" })}>Pricing</a>
+          <a href="#proof" style={nav_link}>Proof</a>
+          <Link href="/command-center" style={cta_ghost} onClick={() => trackEvent("cta_live_demo_click", { location: "nav" })}>Live Demo</Link>
         </nav>
       </header>
 
@@ -67,22 +73,22 @@ export default function HomePage() {
           Enterprise-ready SOC platform with tenant isolation, API-key ingestion, detection marketplace,
           executive metrics, and automated response orchestration built in.
         </p>
-        <div style={heroActions}>
-          <Link href="/command-center" style={ctaPrimary} onClick={() => trackEvent("cta_open_command_center", { location: "hero" })}>Open Command Center</Link>
-          <Link href="/soc-dashboard" style={ctaSecondary} onClick={() => trackEvent("cta_open_soc_dashboard", { location: "hero" })}>Open SOC Dashboard</Link>
-          <a href="/api/demo/bootstrap" style={ctaSecondary} onClick={() => trackEvent("cta_bootstrap_click", { location: "hero" })}>View Demo Tenant Bootstrap</a>
+        <div style={hero_actions}>
+          <Link href="/command-center" style={cta_primary} onClick={() => trackEvent("cta_open_command_center", { location: "hero" })}>Open Command Center</Link>
+          <Link href="/soc-dashboard" style={cta_secondary} onClick={() => trackEvent("cta_open_soc_dashboard", { location: "hero" })}>Open SOC Dashboard</Link>
+          <a href="/api/demo/bootstrap" style={cta_secondary} onClick={() => trackEvent("cta_bootstrap_click", { location: "hero" })}>View Demo Tenant Bootstrap</a>
         </div>
       </section>
 
-      <section id="proof" style={proofGrid}>
-        <article style={proofCard}><h3 style={cardTitle}>SOC2-Ready Audit Trail</h3><p style={cardText}>Every privileged action is tracked with tenant, user, resource, and timestamp.</p></article>
-        <article style={proofCard}><h3 style={cardTitle}>Production RBAC</h3><p style={cardText}>Owner, admin, analyst, viewer roles with explicit enforcement by action.</p></article>
-        <article style={proofCard}><h3 style={cardTitle}>Detection Marketplace</h3><p style={cardText}>Rule packs from Microsoft, phishing, and insider threat categories out of the box.</p></article>
+      <section id="proof" style={proof_grid}>
+        <article style={proof_card}><h3 style={card_title}>SOC2-Ready Audit Trail</h3><p style={card_text}>Every privileged action is tracked with tenant, user, resource, and timestamp.</p></article>
+        <article style={proof_card}><h3 style={card_title}>Production RBAC</h3><p style={card_text}>Owner, admin, analyst, viewer roles with explicit enforcement by action.</p></article>
+        <article style={proof_card}><h3 style={card_title}>Detection Marketplace</h3><p style={card_text}>Rule packs from Microsoft, phishing, and insider threat categories out of the box.</p></article>
       </section>
 
       <section id="platform" style={platform}>
-        <h2 style={sectionTitle}>Why Buyers Choose This Platform</h2>
-        <div style={featureRows}>
+        <h2 style={section_title}>Why Buyers Choose This Platform</h2>
+        <div style={feature_rows}>
           <div style={feature}><strong>Tenant Isolation:</strong> Query-level tenant boundaries across events, alerts, incidents, users, and keys.</div>
           <div style={feature}><strong>Executive Visibility:</strong> MTTD, MTTR, risk trends, and incident volume in one board view.</div>
           <div style={feature}><strong>Realistic Simulation:</strong> Email -&gt; click -&gt; geo anomaly -&gt; exfil chain to demo real threat handling.</div>
@@ -91,18 +97,18 @@ export default function HomePage() {
       </section>
 
       <section id="pricing" style={pricing}>
-        <h2 style={sectionTitle}>Simple, Defensible Pricing</h2>
-        <div style={pricingGrid}>
-          <article style={priceCard}><h3>Free</h3><p style={price}>$0</p><p>Single workspace exploration, core incident views, no advanced marketplace detections.</p></article>
-          <article style={{ ...priceCard, border: "1px solid #f97316" }}><h3>Pro</h3><p style={price}>$2,500/mo</p><p>Full detection packs, response actions, dashboard metrics, and API-key ingestion.</p></article>
-          <article style={priceCard}><h3>Enterprise</h3><p style={price}>Custom</p><p>Dedicated support, private deployment, compliance exports, custom pack development.</p></article>
+        <h2 style={section_title}>Simple, Defensible Pricing</h2>
+        <div style={pricing_grid}>
+          <article style={price_card}><h3>Free</h3><p style={price}>$0</p><p>Single workspace exploration, core incident views, no advanced marketplace detections.</p></article>
+          <article style={{ ...price_card, border: "1px solid #f97316" }}><h3>Pro</h3><p style={price}>$2,500/mo</p><p>Full detection packs, response actions, dashboard metrics, and API-key ingestion.</p></article>
+          <article style={price_card}><h3>Enterprise</h3><p style={price}>Custom</p><p>Dedicated support, private deployment, compliance exports, custom pack development.</p></article>
         </div>
       </section>
 
-      <section style={captureSection}>
-        <h2 style={sectionTitle}>Join the Early Access Program</h2>
+      <section style={capture_section}>
+        <h2 style={section_title}>Join the Early Access Program</h2>
         <p style={{ color: "#cbd5e1", marginTop: 4 }}>Get onboarding priority, direct founder support, and roadmap influence.</p>
-        <form onSubmit={submitLead} style={captureForm}>
+        <form onSubmit={submitLead} style={capture_form}>
           <input
             style={input}
             placeholder="Company"
@@ -125,7 +131,7 @@ export default function HomePage() {
             onChange={(e) => setLead((s) => ({ ...s, role: e.target.value }))}
             required
           />
-          <button style={captureBtn} type="submit" disabled={leadState === "loading"}>
+          <button style={capture_btn} type="submit" disabled={leadState === "loading"}>
             {leadState === "loading" ? "Submitting..." : "Request Access"}
           </button>
         </form>
@@ -134,7 +140,7 @@ export default function HomePage() {
 
       <footer style={footer}>
         <p style={{ margin: 0 }}>Built for SOC leaders, product engineers, and security founders.</p>
-        <p style={{ margin: 0 }}><a href="/api/docs" style={navLink}>API Docs</a> | <a href="/api/health" style={navLink}>Health</a></p>
+        <p style={{ margin: 0 }}><a href="/api/docs" style={nav_link}>API Docs</a> | <a href="/api/health" style={nav_link}>Health</a></p>
       </footer>
     </main>
   );
@@ -149,7 +155,7 @@ const page = {
   padding: "20px clamp(18px, 4vw, 54px) 36px",
 };
 
-const glowA = {
+const glow_a = {
   position: "absolute",
   top: -130,
   left: -90,
@@ -160,7 +166,7 @@ const glowA = {
   filter: "blur(40px)",
 };
 
-const glowB = {
+const glow_b = {
   position: "absolute",
   right: -70,
   top: 130,
@@ -194,13 +200,13 @@ const nav = {
   flexWrap: "wrap",
 };
 
-const navLink = {
+const nav_link = {
   color: "#cbd5e1",
   textDecoration: "none",
   fontSize: 14,
 };
 
-const ctaGhost = {
+const cta_ghost = {
   color: "#e2e8f0",
   textDecoration: "none",
   border: "1px solid rgba(148, 163, 184, 0.5)",
@@ -238,14 +244,14 @@ const subline = {
   lineHeight: 1.6,
 };
 
-const heroActions = {
+const hero_actions = {
   display: "flex",
   flexWrap: "wrap",
   gap: 12,
   marginTop: 24,
 };
 
-const ctaPrimary = {
+const cta_primary = {
   background: "linear-gradient(135deg, #f97316, #fb7185)",
   color: "white",
   borderRadius: 999,
@@ -254,7 +260,7 @@ const ctaPrimary = {
   fontWeight: 700,
 };
 
-const ctaSecondary = {
+const cta_secondary = {
   background: "rgba(15, 23, 42, 0.6)",
   color: "#f1f5f9",
   border: "1px solid rgba(148, 163, 184, 0.4)",
@@ -264,7 +270,7 @@ const ctaSecondary = {
   fontWeight: 700,
 };
 
-const proofGrid = {
+const proof_grid = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))",
   gap: 12,
@@ -273,20 +279,20 @@ const proofGrid = {
   zIndex: 2,
 };
 
-const proofCard = {
+const proof_card = {
   background: "rgba(2, 6, 23, 0.7)",
   border: "1px solid rgba(148, 163, 184, 0.25)",
   borderRadius: 14,
   padding: 14,
 };
 
-const cardTitle = { marginTop: 0, marginBottom: 8 };
-const cardText = { margin: 0, color: "#cbd5e1", lineHeight: 1.45 };
+const card_title = { marginTop: 0, marginBottom: 8 };
+const card_text = { margin: 0, color: "#cbd5e1", lineHeight: 1.45 };
 
 const platform = { marginTop: 40, position: "relative", zIndex: 2 };
-const sectionTitle = { marginTop: 0, marginBottom: 10, fontFamily: "Space Grotesk, Sora, ui-sans-serif" };
+const section_title = { marginTop: 0, marginBottom: 10, fontFamily: "Space Grotesk, Sora, ui-sans-serif" };
 
-const featureRows = { display: "grid", gap: 8 };
+const feature_rows = { display: "grid", gap: 8 };
 const feature = {
   background: "rgba(15, 23, 42, 0.66)",
   border: "1px solid rgba(148, 163, 184, 0.2)",
@@ -296,13 +302,13 @@ const feature = {
 };
 
 const pricing = { marginTop: 40, position: "relative", zIndex: 2 };
-const pricingGrid = {
+const pricing_grid = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))",
   gap: 12,
 };
 
-const priceCard = {
+const price_card = {
   background: "rgba(15, 23, 42, 0.66)",
   border: "1px solid rgba(148, 163, 184, 0.22)",
   borderRadius: 12,
@@ -321,7 +327,7 @@ const footer = {
   zIndex: 2,
 };
 
-const captureSection = {
+const capture_section = {
   marginTop: 38,
   position: "relative",
   zIndex: 2,
@@ -331,7 +337,7 @@ const captureSection = {
   padding: 16,
 };
 
-const captureForm = {
+const capture_form = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
   gap: 10,
@@ -346,7 +352,7 @@ const input = {
   padding: "10px 12px",
 };
 
-const captureBtn = {
+const capture_btn = {
   background: "linear-gradient(135deg, #0891b2, #2563eb)",
   color: "white",
   border: "none",

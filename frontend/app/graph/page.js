@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import axios from "axios";
 import AttackGraph from "../../components/AttackGraph";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
@@ -13,87 +14,97 @@ function scoreColor(score) {
 }
 
 export default function GraphPage() {
-  const [tenantId, setTenantId] = useState("");
-  const [accessToken, setAccessToken] = useState("");
-  const [intelData, setIntelData] = useState(null);
-  const [selectedIncidentUser, setSelectedIncidentUser] = useState("");
-  const [selectedNode, setSelectedNode] = useState(null);
+  const [tenant_id, set_tenant_id] = useState("");
+  const [access_token, set_access_token] = useState("");
+  const [intel_data, set_intel_data] = useState(null);
+  const [selected_incident_user, set_selected_incident_user] = useState("");
+  const [selected_node, set_selected_node] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    async function bootstrapAndLoad() {
+    async function bootstrap_and_load() {
       setLoading(true);
       setError("");
       try {
-        const bootRes = await fetch(`${API}/demo/bootstrap`);
-        const boot = await bootRes.json();
+        const boot_res = await axios.get(`${API}/demo/bootstrap`);
+        const boot = boot_res.data;
         const tenant = boot?.tenant_id || "";
-        setTenantId(tenant);
+        set_tenant_id(tenant);
 
-        const loginRes = await fetch(`${API}/auth/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Tenant-ID": tenant },
-          body: JSON.stringify({ email: "admin@company.com", password: "admin123" }),
-        });
-        const login = await loginRes.json();
-        if (!loginRes.ok || !login?.access_token) {
+        const login_res = await axios.post(
+          `${API}/auth/login`,
+          { email: "admin@company.com", password: "admin123" },
+          { headers: { "Content-Type": "application/json", "X-Tenant-ID": tenant } }
+        );
+        const login = login_res.data;
+        if(!login?.access_token)
+        {
           throw new Error(login?.detail || "Graph login failed");
         }
 
-        setAccessToken(login.access_token);
-        const intelRes = await fetch(`${API}/intelligence/overview?window_minutes=180&event_limit=280`, {
+        set_access_token(login.access_token);
+        const intel_res = await axios.get(`${API}/intelligence/overview?window_minutes=180&event_limit=280`, {
           headers: {
             Authorization: `Bearer ${login.access_token}`,
             "X-Tenant-ID": tenant,
           },
         });
-        const intel = await intelRes.json();
-        if (!intelRes.ok) {
-          throw new Error(intel?.detail || "Failed to load intelligence overview");
-        }
+        const intel = intel_res.data;
 
-        setIntelData(intel);
-        if (Array.isArray(intel?.intelligence) && intel.intelligence[0]?.user) {
-          setSelectedIncidentUser(intel.intelligence[0].user);
+        set_intel_data(intel);
+        if(Array.isArray(intel?.intelligence) && intel.intelligence[0]?.user)
+        {
+          set_selected_incident_user(intel.intelligence[0].user);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load intelligence graph");
+        if(axios.isAxiosError(err))
+        {
+          const msg = err.response?.data?.detail || err.message || "Failed to load intelligence graph";
+          setError(msg);
+        }
+        else
+        {
+          setError(err instanceof Error ? err.message : "Failed to load intelligence graph");
+        }
       } finally {
         setLoading(false);
       }
     }
 
-    bootstrapAndLoad();
+    bootstrap_and_load();
   }, []);
 
-  const graphData = useMemo(() => {
+  const graph_data = useMemo(() => {
     const nodes = [];
     const edges = [];
-    const rawNodes = intelData?.graph?.nodes || [];
-    const rawEdges = intelData?.graph?.edges || [];
+    const raw_nodes = intel_data?.graph?.nodes || [];
+    const raw_edges = intel_data?.graph?.edges || [];
 
-    const focusUser = selectedIncidentUser || null;
-    const focusUserNode = focusUser ? `user:${focusUser}` : null;
-    const focusIps = new Set();
-    const focusEventNodes = new Set();
-    if (focusUserNode) {
-      rawEdges.forEach((edge) => {
-        if (edge.from === focusUserNode && String(edge.to || "").startsWith("ip:")) {
-          focusIps.add(edge.to);
+    const focus_user = selected_incident_user || null;
+    const focus_user_node = focus_user ? `user:${focus_user}` : null;
+    const focus_ips = new Set();
+    const focus_event_nodes = new Set();
+    if(focus_user_node)
+    {
+      raw_edges.forEach((edge) => {
+        if(edge.from === focus_user_node && String(edge.to || "").startsWith("ip:"))
+        {
+          focus_ips.add(edge.to);
         }
-        if (edge.from === focusUserNode && String(edge.to || "").startsWith("event:")) {
-          focusEventNodes.add(edge.to);
+        if(edge.from === focus_user_node && String(edge.to || "").startsWith("event:"))
+        {
+          focus_event_nodes.add(edge.to);
         }
       });
     }
 
-    const users = rawNodes.filter((n) => n.type === "user");
-    const ips = rawNodes.filter((n) => n.type === "ip");
-    const events = rawNodes.filter((n) => n.type === "event");
+    const users = raw_nodes.filter((n) => n.type === "user");
+    const ips = raw_nodes.filter((n) => n.type === "ip");
+    const events = raw_nodes.filter((n) => n.type === "event");
 
     users.forEach((n, idx) => {
-      const active = n.id === focusUserNode;
+      const active = n.id === focus_user_node;
       const color = scoreColor(Number(n.risk_score || 0));
       nodes.push({
         id: n.id,
@@ -110,7 +121,7 @@ export default function GraphPage() {
     });
 
     ips.forEach((n, idx) => {
-      const active = focusIps.has(n.id);
+      const active = focus_ips.has(n.id);
       nodes.push({
         id: n.id,
         data: { label: `IP: ${n.label}` },
@@ -121,13 +132,13 @@ export default function GraphPage() {
           border: `2px solid ${active ? "#22d3ee" : "#f97316"}`,
           borderRadius: 10,
           minWidth: 180,
-          opacity: focusUserNode && !active ? 0.5 : 1,
+          opacity: focus_user_node && !active ? 0.5 : 1,
         },
       });
     });
 
     events.forEach((n, idx) => {
-      const active = focusEventNodes.has(n.id);
+      const active = focus_event_nodes.has(n.id);
       nodes.push({
         id: n.id,
         data: { label: `Event: ${n.label}` },
@@ -138,20 +149,20 @@ export default function GraphPage() {
           border: `2px solid ${active ? "#22d3ee" : "#eab308"}`,
           borderRadius: 10,
           minWidth: 210,
-          opacity: focusUserNode && !active ? 0.4 : 1,
+          opacity: focus_user_node && !active ? 0.4 : 1,
         },
       });
     });
 
-    rawEdges.forEach((edge, idx) => {
+    raw_edges.forEach((edge, idx) => {
       const active =
-        !focusUserNode ||
-        edge.from === focusUserNode ||
-        edge.to === focusUserNode ||
-        focusIps.has(edge.from) ||
-        focusIps.has(edge.to) ||
-        focusEventNodes.has(edge.from) ||
-        focusEventNodes.has(edge.to);
+        !focus_user_node ||
+        edge.from === focus_user_node ||
+        edge.to === focus_user_node ||
+        focus_ips.has(edge.from) ||
+        focus_ips.has(edge.to) ||
+        focus_event_nodes.has(edge.from) ||
+        focus_event_nodes.has(edge.to);
 
       edges.push({
         id: `e:${idx}:${edge.from}:${edge.to}:${edge.label}`,
@@ -164,20 +175,38 @@ export default function GraphPage() {
     });
 
     return { nodes, edges };
-  }, [intelData, selectedIncidentUser]);
+  }, [intel_data, selected_incident_user]);
 
-  const timelineSlice = useMemo(() => {
-    if (!selectedIncidentUser) return [];
-    return (intelData?.graph?.nodes || [])
+  const timeline_slice = useMemo(() => {
+    if (!selected_incident_user) return [];
+    const raw_nodes = intel_data?.graph?.nodes || [];
+    const raw_edges = intel_data?.graph?.edges || [];
+    const user_node_id = `user:${selected_incident_user}`;
+
+    const linked_event_ids = new Set(
+      raw_edges
+        .filter((edge) => edge.from === user_node_id && String(edge.to || "").startsWith("event:"))
+        .map((edge) => edge.to)
+    );
+
+    const get_time = (value) => {
+      const t = Date.parse(value || "");
+      return Number.isNaN(t) ? 0 : t;
+    };
+
+    return raw_nodes
       .filter((item) => item.type === "event")
-      .slice(-8);
-  }, [intelData, selectedIncidentUser]);
+      .filter((item) => linked_event_ids.size === 0 || linked_event_ids.has(item.id))
+      .sort((a, b) => get_time(b.timestamp) - get_time(a.timestamp))
+      .slice(0, 8);
+  }, [intel_data, selected_incident_user]);
 
-  function onNodeClick(_evt, node) {
-    const details = (intelData?.graph?.nodes || []).find((n) => n.id === node.id) || null;
-    setSelectedNode(details);
-    if (String(node.id).startsWith("user:")) {
-      setSelectedIncidentUser(String(node.id).replace("user:", ""));
+  function on_node_click(_evt, node) {
+    const details = (intel_data?.graph?.nodes || []).find((n) => n.id === node.id) || null;
+    set_selected_node(details);
+    if(String(node.id).startsWith("user:"))
+    {
+      set_selected_incident_user(String(node.id).replace("user:", ""));
     }
   }
 
@@ -185,7 +214,7 @@ export default function GraphPage() {
     <main style={{ padding: 20, display: "grid", gap: 12 }}>
       <h1 style={{ margin: 0, color: "#60a5fa" }}>Incident Intelligence Graph</h1>
       <p style={{ margin: 0, color: "#94a3b8" }}>
-        Tenant: {tenantId || "-"} | Auth: {accessToken ? "connected" : "pending"}
+        Tenant: {tenant_id || "-"} | Auth: {access_token ? "connected" : "pending"}
       </p>
       {loading ? <p style={{ color: "#94a3b8" }}>Loading intelligence...</p> : null}
       {error ? <p style={{ color: "#f87171" }}>{error}</p> : null}
@@ -195,14 +224,14 @@ export default function GraphPage() {
           <section style={panel}>
             <h3 style={title}>Incident Queue</h3>
             <div style={{ display: "grid", gap: 8 }}>
-              {(intelData?.intelligence || []).map((item) => (
+              {(intel_data?.intelligence || []).map((item) => (
                 <button
                   key={item.user}
-                  onClick={() => setSelectedIncidentUser(item.user)}
+                  onClick={() => set_selected_incident_user(item.user)}
                   style={{
                     textAlign: "left",
-                    background: item.user === selectedIncidentUser ? "#0c4a6e" : "#0f172a",
-                    border: `1px solid ${item.user === selectedIncidentUser ? "#22d3ee" : "#334155"}`,
+                    background: item.user === selected_incident_user ? "#0c4a6e" : "#0f172a",
+                    border: `1px solid ${item.user === selected_incident_user ? "#22d3ee" : "#334155"}`,
                     color: "#e2e8f0",
                     borderRadius: 8,
                     padding: "8px 10px",
@@ -215,12 +244,12 @@ export default function GraphPage() {
             </div>
           </section>
 
-          <AttackGraph nodes={graphData.nodes} edges={graphData.edges} onNodeClick={onNodeClick} />
+          <AttackGraph nodes={graph_data.nodes} edges={graph_data.edges} onNodeClick={on_node_click} />
 
           <section style={panel}>
             <h3 style={title}>Node Intelligence</h3>
-            {selectedNode ? (
-              <pre style={pre}>{JSON.stringify(selectedNode, null, 2)}</pre>
+            {selected_node ? (
+              <pre style={pre}>{JSON.stringify(selected_node, null, 2)}</pre>
             ) : (
               <p style={{ color: "#94a3b8", margin: 0 }}>Click a graph node to inspect relationships and context.</p>
             )}
@@ -229,7 +258,7 @@ export default function GraphPage() {
           <section style={panel}>
             <h3 style={title}>Timeline Slice</h3>
             <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
-              {timelineSlice.map((item) => (
+              {timeline_slice.map((item) => (
                 <li key={item.id} style={{ borderBottom: "1px solid #1e293b", paddingBottom: 6, color: "#cbd5e1" }}>
                   {item.timestamp || "-"} | {item.label}
                 </li>
