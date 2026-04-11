@@ -1886,6 +1886,24 @@ def list_report_schedules(_admin=Depends(require_internal_admin_token)):
             return [ReportScheduleResponse(**row) for row in rows]
 
 
+@app.get("/admin/reports/schedules/due")
+def list_due_report_schedules_ordered(_admin=Depends(require_internal_admin_token)):
+    """List enabled schedules whose next_run is in the past (i.e. currently overdue)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, frequency, next_run
+                FROM report_schedules
+                WHERE enabled = TRUE
+                  AND next_run IS NOT NULL
+                  AND next_run <= NOW()
+                ORDER BY next_run ASC
+                """
+            )
+            return cur.fetchall()
+
+
 @app.get("/admin/reports/schedules/{schedule_id}")
 def get_report_schedule(schedule_id: int, _admin=Depends(require_internal_admin_token)):
     """Get a specific board report export schedule."""
@@ -1976,24 +1994,6 @@ def update_report_schedule(
             row = cur.fetchone()
             conn.commit()
             return ReportScheduleResponse(**row)
-
-
-@app.get("/admin/reports/schedules/due")
-def list_due_report_schedules(_admin=Depends(require_internal_admin_token)):
-    """List enabled schedules whose next_run is in the past (i.e. currently overdue)."""
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, name, frequency, next_run
-                FROM report_schedules
-                WHERE enabled = TRUE
-                  AND next_run IS NOT NULL
-                  AND next_run <= NOW()
-                ORDER BY next_run ASC
-                """
-            )
-            return cur.fetchall()
 
 
 @app.delete("/admin/reports/schedules/{schedule_id}")
