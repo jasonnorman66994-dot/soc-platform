@@ -294,6 +294,58 @@ def _build_incident_intelligence_graph(events: list[dict], risk_by_user: dict[st
     return {"nodes": list(nodes_by_id.values()), "edges": dedup_edges}
 
 
+AUTO_RESPONSE_ENABLED = os.getenv("AUTO_RESPONSE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+AUTO_RESPONSE_RISK_THRESHOLD = int(os.getenv("AUTO_RESPONSE_RISK_THRESHOLD", "85"))
+
+
+def _select_playbook_title(patterns: list[str], event_type: str | None) -> str:
+    if "ACCOUNT_TAKEOVER" in patterns:
+        return "account_takeover"
+    if "IMPOSSIBLE_TRAVEL_CHAIN" in patterns:
+        return "suspicious_ip"
+    if event_type == "data_exfil":
+        return "data_exfiltration"
+    if event_type in {"email", "email_click"}:
+        return "phishing"
+    return "generic_alert"
+
+
+def _should_auto_respond(incident_row: dict | None, risk_score: int, patterns: list[str]) -> bool:
+    if not AUTO_RESPONSE_ENABLED or not incident_row:
+        return False
+    if (incident_row.get("status") or "").lower() in {"responded", "closed", "resolved"}:
+        return False
+    if incident_row.get("responded_at"):
+        return False
+    if risk_score >= AUTO_RESPONSE_RISK_THRESHOLD:
+        return True
+    return any(item in {"ACCOUNT_TAKEOVER", "IMPOSSIBLE_TRAVEL_CHAIN"} for item in patterns)
+
+
+def _build_playbook_inputs(incident_row: dict, payload: dict, patterns: list[str], risk_score: int) -> tuple[dict, dict]:
+    event_type = payload.get("event_type")
+    incident_payload = {
+        "id": incident_row.get("id"),
+        "title": _select_playbook_title(patterns, event_type),
+        "severity": incident_row.get("severity") or "medium",
+        "status": incident_row.get("status") or "open",
+        "context": {
+            "user": payload.get("user_id"),
+            "ip": payload.get("ip"),
+            "sender_domain": payload.get("sender_domain"),
+            "patterns": patterns,
+            "risk_score": risk_score,
+        },
+    }
+    event_payload = {
+        "user": payload.get("user_id"),
+        "ip": payload.get("ip"),
+        "sender_domain": payload.get("sender_domain"),
+        "event_type": event_type,
+    }
+    return incident_payload, event_payload
+
+
 def render_executive_story_markdown(report: dict) -> str:
     summary = report["summary"]
     timeline = report["timeline"]
@@ -2202,11 +2254,11 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
 
                 cur.execute(
                     """
-                    SELECT id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                                        SELECT id, tenant_id, entity, severity, status, story, assigned_to, responded_at, timestamp
                     FROM incidents
                     WHERE tenant_id=%s
                       AND entity=%s
-                      AND status <> 'resolved'
+                                            AND status IN ('open', 'investigating')
                       AND last_seen >= NOW() - INTERVAL '30 minutes'
                     ORDER BY id DESC
                     LIMIT 1
@@ -2242,7 +2294,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                             status='open',
                             last_seen=NOW()
                         WHERE id=%s
-                        RETURNING id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                        RETURNING id, tenant_id, entity, severity, status, story, assigned_to, responded_at, timestamp
                         """,
                         (merged_severity, json.dumps(merged_story), existing_incident["id"]),
                     )
@@ -2252,7 +2304,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                         """
                         INSERT INTO incidents (tenant_id, entity, severity, status, story, assigned_to)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING id, tenant_id, entity, severity, status, story, assigned_to, timestamp
+                        RETURNING id, tenant_id, entity, severity, status, story, assigned_to, responded_at, timestamp
                         """,
                         (tenant_id, entity, incident["severity"], incident["status"], json.dumps(incoming_story), None),
                     )
@@ -2285,6 +2337,55 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
             for item in alert_rows
         ]
         risk_score = _calculate_context_risk(context, user_alerts, patterns)
+
+        if _should_auto_respond(incident_row, risk_score, patterns):
+            incident_payload, event_payload = _build_playbook_inputs(incident_row, payload, patterns, risk_score)
+            playbook_result = execute_playbook_for_incident(incident_payload, event_payload)
+            playbook_status = playbook_result.get("status", "unknown")
+
+            if playbook_status == "success" and incident_row:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE incidents SET status='responded', responded_at=NOW() WHERE id=%s AND tenant_id=%s",
+                            (incident_row["id"], tenant_id),
+                        )
+                    conn.commit()
+                incident_row["status"] = "responded"
+                incident_row["responded_at"] = now_utc().isoformat()
+
+            if incident_row:
+                log_response_action(
+                    incident_row["id"],
+                    "auto_playbook",
+                    "success" if playbook_status == "success" else "error",
+                    playbook_result,
+                )
+
+            await broadcast(
+                tenant_id,
+                {
+                    "kind": "soar_auto_response",
+                    "incident_id": incident_row["id"] if incident_row else None,
+                    "status": playbook_status,
+                    "playbook": playbook_result.get("playbook"),
+                    "actions": len(playbook_result.get("actions", [])),
+                },
+            )
+
+            log_action(
+                tenant_id,
+                None,
+                "soar.auto_playbook",
+                f"incidents/{incident_row['id']}" if incident_row else "incidents/unknown",
+                {
+                    "risk_score": risk_score,
+                    "patterns": patterns,
+                    "playbook": playbook_result.get("playbook"),
+                    "status": playbook_status,
+                },
+            )
+
         await broadcast(
             tenant_id,
             {
