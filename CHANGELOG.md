@@ -1,25 +1,23 @@
 # Changelog
 
-## Unreleased
+ ## v1.3.0 (Board Report Export Scheduling)
+ 
+ ### Added
+ 
+ - Board report export scheduling with admin CRUD endpoints: POST, GET, PATCH, DELETE `/admin/reports/schedules`
+ - Report schedule database model with frequency (daily/weekly/monthly), time, format, recipients, and enabled flag
+ - Command Center UI section for managing scheduled report exports with real-time schedule list display
+ 
+ ## Unreleased
 
-### Added
 
-- Admin session APIs for create, refresh, and revoke operations.
-- Funnel analytics API for platform and tenant-level conversion visibility.
-- Webhook observability APIs for daily summary and recent event traces.
-- Demo automation endpoints for tenant reset and showcase attack sequence.
-- Command Center admin operations panel for session and KPI workflows.
-- Demo-day script for repeatable presentation setup and KPI capture.
-- Board-ready admin report endpoints for KPI JSON and downloadable Markdown summaries.
-- Command Center board report controls for `window_days` and `incident_limit` with parameterized load/download actions.
+ ### Added
+ 
+ - (Pending v1.4.0+ work)
 
-### Changed
 
-- User password handling now writes hashes on create/signup and migrates plaintext on successful login.
-- Health checks now include security posture warnings.
-- Docker compose backend environment now supports secret and hardening parameterization.
 
-### Security
 
-- Added webhook replay fingerprint deduplication and retention cleanup control.
-- Added strict security mode gate for production startup policy enforcement.
+ ### Changed
+ 
+ ### Security
