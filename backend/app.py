@@ -1923,6 +1923,34 @@ def list_due_report_schedules_ordered(_admin=Depends(require_internal_admin_toke
             return cur.fetchall()
 
 
+@app.get("/admin/reports/schedules/summary")
+def get_report_schedule_summary(_admin=Depends(require_internal_admin_token)):
+    """Return operational counters for report schedules."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE enabled = TRUE) AS enabled,
+                    COUNT(*) FILTER (WHERE enabled = FALSE) AS paused,
+                    COUNT(*) FILTER (
+                        WHERE enabled = TRUE
+                          AND next_run IS NOT NULL
+                          AND next_run <= NOW()
+                    ) AS due
+                FROM report_schedules
+                """
+            )
+            row = cur.fetchone() or {}
+            return {
+                "total": int(row.get("total") or 0),
+                "enabled": int(row.get("enabled") or 0),
+                "paused": int(row.get("paused") or 0),
+                "due": int(row.get("due") or 0),
+            }
+
+
 @app.post("/admin/reports/schedules/run-due")
 def run_due_report_schedules(_admin=Depends(require_internal_admin_token)):
     """Execute all currently due schedules immediately and return execution summary."""

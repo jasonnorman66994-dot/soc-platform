@@ -21,6 +21,8 @@
 - Command Center now supports schedule editing: load a schedule into the form, update via `PATCH /api/admin/reports/schedules/{id}`, or cancel edit.
 - New endpoint `POST /api/admin/reports/schedules/run-due` executes all currently due schedules immediately and returns execution summary counts.
 - Command Center adds a `Run Due Now` control to trigger due-schedule execution on demand and display summary results.
+- New endpoint `GET /api/admin/reports/schedules/summary` returns operational counters for schedule state (`total`, `enabled`, `paused`, `due`).
+- Command Center schedule panel now shows live summary counters for total, enabled, paused, and due-now schedules.
 
 ### Changed
 
