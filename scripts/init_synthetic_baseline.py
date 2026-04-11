@@ -54,10 +54,10 @@ def resolve_department_users(departments_csv: str) -> list[str]:
     return users
 
 
-def synthetic_events(tenant_id: str, user_id: str, day_offset: int, rng: random.Random, department: str | None = None) -> list[tuple[str, str, str, str]]:
+def synthetic_events(tenant_id: str, user_id: str, day_offset: int, rng: random.Random, department: str | None = None) -> list[tuple[str, str, str, str, str]]:
     base_day = backend_app.now_utc().astimezone(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=day_offset)
     remote_ip = f"198.51.100.{20 + day_offset}"
-    records: list[tuple[str, str, str, str]] = []
+    records: list[tuple[str, str, str, str, str]] = []
 
     login_count = 2 + (day_offset % 2)
     for login_index in range(login_count):

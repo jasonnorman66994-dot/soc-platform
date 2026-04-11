@@ -999,74 +999,97 @@ def poll_threat_intel_feed() -> dict[str, dict]:
     return _THREAT_INTEL_FEED
 
 
+def _delete_shared_threat(ip: str, source_tenant: str, source: str = "Ghost Drill") -> None:
+    """Remove a temporary shared threat indicator created for a drill."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM shared_threats WHERE ip = %s AND source_tenant = %s AND source = %s",
+                    (ip, source_tenant, source),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
 def ghost_drill_propagate(source_tenant: str, target_tenant: str, ip: str, category: str = "ghost_drill_critical", risk: int = 100) -> dict:
-    """Ghost Drill: inject a test critical indicator in source tenant and verify instant propagation to target."""
+    """Ghost Drill: inject a test critical indicator and verify propagation in the shared feed."""
     reason = f"Ghost drill injected from {source_tenant}"
     _upsert_shared_threat(ip, source_tenant, category, risk, reason, source="Ghost Drill")
-    target_match = _get_shared_threat(ip)
-    propagated = target_match is not None
-    return {
-        "drill": "ghost_drill",
-        "source_tenant": source_tenant,
-        "target_tenant": target_tenant,
-        "ip": ip,
-        "risk": risk,
-        "category": category,
-        "propagated": propagated,
-        "target_blocklist_match": target_match,
-        "status": "pass" if propagated else "fail",
-    }
+    try:
+        shared_match = _get_shared_threat(ip)
+        target_match = shared_match if target_tenant == source_tenant else None
+        propagated = shared_match is not None
+        return {
+            "drill": "ghost_drill",
+            "source_tenant": source_tenant,
+            "target_tenant": target_tenant,
+            "ip": ip,
+            "risk": risk,
+            "category": category,
+            "propagated": propagated,
+            "target_blocklist_match": target_match,
+            "status": "pass" if propagated else "fail",
+        }
+    finally:
+        _delete_shared_threat(ip, source_tenant, source="Ghost Drill")
 
 
 def _identify_highest_risk_user(tenant_id: str) -> dict:
-    """Identify the user with the highest aggregate risk using z-score analysis across event types."""
+    """Identify the user with the highest max z-score spike across event types."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT user_id, type, COUNT(*) AS cnt
+                SELECT
+                    user_id,
+                    COALESCE(type, 'unknown') AS type,
+                    date_trunc('hour', timestamp) AS hour_bucket,
+                    COUNT(*) AS cnt
                 FROM events
                 WHERE tenant_id=%s
                   AND timestamp >= NOW() - INTERVAL '7 days'
                   AND user_id IS NOT NULL
-                GROUP BY user_id, type
-                ORDER BY user_id, type
+                GROUP BY user_id, COALESCE(type, 'unknown'), date_trunc('hour', timestamp)
+                ORDER BY user_id, type, hour_bucket
                 """,
                 (tenant_id,),
             )
             rows = cur.fetchall()
 
-    user_scores: dict[str, list[tuple[str, float, dict]]] = {}
-    user_type_counts: dict[str, dict[str, int]] = {}
+    if not rows:
+        return {"user_id": None, "max_z_score": 0.0, "explanation": "No users with activity in the last 7 days."}
+
+    hourly_counts: dict[str, dict[str, list[int]]] = {}
     for row in rows:
         uid = row.get("user_id")
         etype = row.get("type") or "unknown"
         cnt = int(row.get("cnt") or 0)
-        if uid not in user_type_counts:
-            user_type_counts[uid] = {}
-        user_type_counts[uid][etype] = cnt
-
-    for uid, type_counts in user_type_counts.items():
-        scores: list[tuple[str, float, dict]] = []
-        for etype in type_counts:
-            z, meta = _event_frequency_zscore(tenant_id, uid, etype)
-            scores.append((etype, round(z, 2), meta))
-        user_scores[uid] = scores
-
-    if not user_scores:
-        return {"user_id": None, "max_z_score": 0.0, "explanation": "No users with activity in the last 7 days."}
+        hourly_counts.setdefault(uid, {}).setdefault(etype, []).append(cnt)
 
     best_user = None
     best_z = -999.0
     best_event_type = None
-    best_meta = {}
-    for uid, scores in user_scores.items():
-        for etype, z, meta in scores:
+    best_meta: dict = {}
+    for uid, event_buckets in hourly_counts.items():
+        for etype, counts in event_buckets.items():
+            if not counts:
+                continue
+            current = counts[-1]
+            baseline = counts[:-1] if len(counts) > 1 else counts
+            mean = sum(baseline) / len(baseline)
+            variance = sum((v - mean) ** 2 for v in baseline) / len(baseline)
+            stddev = variance ** 0.5
+            z = 0.0 if stddev == 0 else round((current - mean) / stddev, 2)
             if z > best_z:
                 best_z = z
                 best_user = uid
                 best_event_type = etype
-                best_meta = meta
+                best_meta = {"current": current, "mean": round(mean, 2), "stddev": round(stddev, 2)}
 
     explanation = (
         f"User {best_user} is highest risk due to a {best_z:.1f} z-score spike "
