@@ -383,6 +383,22 @@ export default function CommandCenterPage() {
     await loadReportSchedules();
   }
 
+  async function toggleReportSchedule(scheduleId, currentEnabled) {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminAccessToken}` },
+      body: JSON.stringify({ enabled: !currentEnabled }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to toggle schedule");
+      return;
+    }
+    setAdminError("");
+    await loadReportSchedules();
+  }
+
   async function runReportSchedule(scheduleId) {
     if (!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}/run`, {
@@ -584,6 +600,7 @@ export default function CommandCenterPage() {
                     <span>{s.name} ({s.frequency} @ {s.hour_of_day}:00{typeof s.day_of_week === "number" ? `, dow ${s.day_of_week}` : ""}{typeof s.day_of_month === "number" ? `, dom ${s.day_of_month}` : ""}{s.next_run ? `, next ${new Date(s.next_run).toLocaleString()}` : ", paused"})</span>
                     <div style={{ display: "flex", gap: 6 }}>
                       <button style={{ ...btnSecondary, padding: "4px 8px", fontSize: "12px" }} onClick={() => runReportSchedule(s.id)}>Run Now</button>
+                      <button style={{ ...btnSecondary, padding: "4px 8px", fontSize: "12px", borderColor: s.enabled ? "#f59e0b" : "#22c55e", color: s.enabled ? "#f59e0b" : "#22c55e" }} onClick={() => toggleReportSchedule(s.id, s.enabled)}>{s.enabled ? "Pause" : "Resume"}</button>
                       <button style={{ ...btn, background: "#dc2626", padding: "4px 8px", fontSize: "12px" }} onClick={() => deleteReportSchedule(s.id)}>Delete</button>
                     </div>
                   </li>
