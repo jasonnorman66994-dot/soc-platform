@@ -13,7 +13,8 @@
 
  ### Added
  
- - (Pending v1.4.0+ work)
+ - Board report schedules now validate cadence fields and compute `next_run` for daily, weekly, and monthly exports.
+ - Monthly board report schedules now support `day_of_month` in the admin API and Command Center.
 
 
 
