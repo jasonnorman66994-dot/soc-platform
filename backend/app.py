@@ -295,7 +295,15 @@ def _build_incident_intelligence_graph(events: list[dict], risk_by_user: dict[st
 
 
 AUTO_RESPONSE_ENABLED = os.getenv("AUTO_RESPONSE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-AUTO_RESPONSE_RISK_THRESHOLD = int(os.getenv("AUTO_RESPONSE_RISK_THRESHOLD", "85"))
+_raw_threshold = os.getenv("AUTO_RESPONSE_RISK_THRESHOLD", "85")
+try:
+    AUTO_RESPONSE_RISK_THRESHOLD = int(_raw_threshold)
+except (ValueError, TypeError):
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "AUTO_RESPONSE_RISK_THRESHOLD=%r is not a valid integer; defaulting to 85", _raw_threshold
+    )
+    AUTO_RESPONSE_RISK_THRESHOLD = 85
 
 
 def _select_playbook_title(patterns: list[str], event_type: str | None) -> str:
@@ -2339,52 +2347,84 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
         risk_score = _calculate_context_risk(context, user_alerts, patterns)
 
         if _should_auto_respond(incident_row, risk_score, patterns):
-            incident_payload, event_payload = _build_playbook_inputs(incident_row, payload, patterns, risk_score)
-            playbook_result = execute_playbook_for_incident(incident_payload, event_payload)
-            playbook_status = playbook_result.get("status", "unknown")
-
-            if playbook_status == "success" and incident_row:
+            # Atomically claim the incident for auto-response to prevent concurrent duplicates
+            claimed_for_response = False
+            previous_incident_status = (incident_row.get("status") or "open") if incident_row else "open"
+            if incident_row:
                 with get_conn() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE incidents SET status='responded', responded_at=NOW() WHERE id=%s AND tenant_id=%s",
+                            """
+                            UPDATE incidents
+                            SET status='responding'
+                            WHERE id=%s
+                              AND tenant_id=%s
+                              AND responded_at IS NULL
+                              AND COALESCE(status, '') NOT IN ('responding', 'responded')
+                            """,
                             (incident_row["id"], tenant_id),
                         )
+                        claimed_for_response = cur.rowcount == 1
                     conn.commit()
-                incident_row["status"] = "responded"
-                incident_row["responded_at"] = now_utc().isoformat()
+                if claimed_for_response:
+                    incident_row["status"] = "responding"
 
-            if incident_row:
+            if claimed_for_response:
+                incident_payload, event_payload = _build_playbook_inputs(incident_row, payload, patterns, risk_score)
+                playbook_result = execute_playbook_for_incident(incident_payload, event_payload)
+                playbook_status = playbook_result.get("status", "unknown")
+
+                if playbook_status == "success":
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE incidents SET status='responded', responded_at=NOW() WHERE id=%s AND tenant_id=%s AND status='responding'",
+                                (incident_row["id"], tenant_id),
+                            )
+                        conn.commit()
+                    incident_row["status"] = "responded"
+                    incident_row["responded_at"] = now_utc().isoformat()
+                else:
+                    # Restore previous status if playbook did not succeed
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE incidents SET status=%s WHERE id=%s AND tenant_id=%s AND status='responding'",
+                                (previous_incident_status, incident_row["id"], tenant_id),
+                            )
+                        conn.commit()
+                    incident_row["status"] = previous_incident_status
+
                 log_response_action(
                     incident_row["id"],
                     "auto_playbook",
-                    "success" if playbook_status == "success" else "error",
+                    playbook_status,
                     playbook_result,
                 )
 
-            await broadcast(
-                tenant_id,
-                {
-                    "kind": "soar_auto_response",
-                    "incident_id": incident_row["id"] if incident_row else None,
-                    "status": playbook_status,
-                    "playbook": playbook_result.get("playbook"),
-                    "actions": len(playbook_result.get("actions", [])),
-                },
-            )
+                await broadcast(
+                    tenant_id,
+                    {
+                        "kind": "soar_auto_response",
+                        "incident_id": incident_row["id"] if incident_row else None,
+                        "status": playbook_status,
+                        "playbook": playbook_result.get("playbook"),
+                        "actions": len(playbook_result.get("actions", [])),
+                    },
+                )
 
-            log_action(
-                tenant_id,
-                None,
-                "soar.auto_playbook",
-                f"incidents/{incident_row['id']}" if incident_row else "incidents/unknown",
-                {
-                    "risk_score": risk_score,
-                    "patterns": patterns,
-                    "playbook": playbook_result.get("playbook"),
-                    "status": playbook_status,
-                },
-            )
+                log_action(
+                    tenant_id,
+                    None,
+                    "soar.auto_playbook",
+                    f"incidents/{incident_row['id']}" if incident_row else "incidents/unknown",
+                    {
+                        "risk_score": risk_score,
+                        "patterns": patterns,
+                        "playbook": playbook_result.get("playbook"),
+                        "status": playbook_status,
+                    },
+                )
 
         await broadcast(
             tenant_id,
@@ -2660,30 +2700,65 @@ def automate_incident_response(
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM incidents WHERE id=%s AND tenant_id=%s",
+                "SELECT id, tenant_id, entity, severity, status, story, assigned_to, responded_at, last_seen, timestamp FROM incidents WHERE id=%s AND tenant_id=%s",
                 (incident_id, tenant_id),
             )
             incident_row = cur.fetchone()
-    
+
     if not incident_row:
         raise HTTPException(status_code=404, detail="Incident not found")
-    
-    # Get event associated with incident
+
+    # Fetch recent events for this incident's entity to build proper context
+    entity = incident_row.get("entity") or ""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM events WHERE tenant_id=%s ORDER BY id DESC LIMIT 1",
-                (tenant_id,),
+                """
+                SELECT id, user_id, type, raw, timestamp
+                FROM events
+                WHERE tenant_id=%s AND (user_id=%s OR raw::text ILIKE %s)
+                ORDER BY id DESC LIMIT 20
+                """,
+                (tenant_id, entity, f"%{entity}%"),
             )
-            event_row = cur.fetchone()
-    
-    if not event_row:
+            event_rows = cur.fetchall()
+
+    if not event_rows:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, user_id, type, raw, timestamp FROM events WHERE tenant_id=%s ORDER BY id DESC LIMIT 1",
+                    (tenant_id,),
+                )
+                event_rows = cur.fetchall()
+
+    if not event_rows:
         return {"status": "warning", "message": "No events found for incident"}
-    
-    # Execute playbook
-    result = execute_playbook_for_incident(incident_row, event_row)
-    
-    # Log the automation
+
+    latest_event = event_rows[0]
+    raw = latest_event.get("raw") or {}
+    payload = {
+        "user_id": latest_event.get("user_id"),
+        "event_type": latest_event.get("type"),
+        "ip": raw.get("ip"),
+        "sender_domain": raw.get("sender_domain"),
+    }
+
+    # Detect patterns and build proper payloads matching ingest-time shape
+    patterns: list[str] = []
+    if incident_row.get("story"):
+        story = incident_row["story"].lower()
+        if "account_takeover" in story or "account takeover" in story:
+            patterns.append("ACCOUNT_TAKEOVER")
+        if "impossible_travel" in story or "impossible travel" in story:
+            patterns.append("IMPOSSIBLE_TRAVEL_CHAIN")
+
+    incident_payload, event_payload = _build_playbook_inputs(
+        incident_row, payload, patterns, 0
+    )
+    result = execute_playbook_for_incident(incident_payload, event_payload)
+
+    log_response_action(incident_id, "manual_playbook", result.get("status", "unknown"), result)
     log_action(
         tenant_id,
         user["id"],
@@ -2691,16 +2766,16 @@ def automate_incident_response(
         f"incidents/{incident_id}",
         {"playbook": result.get("playbook"), "actions": len(result.get("actions", []))},
     )
-    
-    # Mark incident as responded
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE incidents SET status=%s, responded_at=NOW() WHERE id=%s AND tenant_id=%s",
-                ("responded", incident_id, tenant_id),
-            )
-        conn.commit()
-    
+
+    if result.get("status") == "success":
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE incidents SET status='responded', responded_at=NOW() WHERE id=%s AND tenant_id=%s",
+                    (incident_id, tenant_id),
+                )
+            conn.commit()
+
     return result
 
 

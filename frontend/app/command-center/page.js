@@ -212,9 +212,13 @@ export default function CommandCenterPage() {
       }
       setSoarLastResult(data);
       setToast({ type: "success", message: `SOAR playbook executed: ${data?.playbook || "unknown"}` });
-      await fetchIncidents();
-      await fetchAlerts();
-      await loadSoarHistory(incidentId);
+      try {
+        await fetchIncidents();
+        await fetchAlerts();
+        await loadSoarHistory(incidentId);
+      } catch {
+        setToast({ type: "warning", message: "SOAR playbook executed, but the dashboard refresh failed" });
+      }
     } catch {
       setToast({ type: "error", message: "SOAR automation failed" });
     }
