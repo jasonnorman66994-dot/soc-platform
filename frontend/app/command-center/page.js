@@ -49,6 +49,7 @@ export default function CommandCenterPage() {
   const [reportSchedules, setReportSchedules] = useState([]);
   const [scheduleForm, setScheduleForm] = useState(getDefaultScheduleForm());
   const [editingScheduleId, setEditingScheduleId] = useState(null);
+  const [scheduleRunSummary, setScheduleRunSummary] = useState("");
 
   const authHeaders = useMemo(
     () => ({
@@ -398,8 +399,27 @@ export default function CommandCenterPage() {
       return;
     }
     setAdminError("");
+    setScheduleRunSummary("");
     setEditingScheduleId(null);
     setScheduleForm(getDefaultScheduleForm());
+    await loadReportSchedules();
+  }
+
+  async function runDueSchedulesNow() {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/schedules/run-due`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to run due schedules");
+      return;
+    }
+    setAdminError("");
+    setScheduleRunSummary(
+      `Run due summary: found ${data?.found ?? 0}, executed ${data?.executed_count ?? 0}, failed ${data?.failed_count ?? 0}`
+    );
     await loadReportSchedules();
   }
 
@@ -633,7 +653,9 @@ export default function CommandCenterPage() {
             {editingScheduleId ? (
               <button style={btnSecondary} onClick={cancelEditSchedule}>Cancel Edit</button>
             ) : null}
+            <button style={btnSecondary} onClick={runDueSchedulesNow}>Run Due Now</button>
           </div>
+          {scheduleRunSummary ? <p style={{ marginBottom: 0, color: "#34d399" }}>{scheduleRunSummary}</p> : null}
           {reportSchedules.length > 0 && (
             <div style={{ marginTop: 10 }}>
               <h5 style={{ margin: 0, marginBottom: 6, color: "#94a3b8" }}>Active Schedules:</h5>
