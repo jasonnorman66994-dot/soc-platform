@@ -38,6 +38,7 @@ Production-oriented stream pipeline components are now scaffolded:
 - `backend/ingestion/producer.py` (Kafka producer)
 - `backend/workers/consumer.py` (Kafka consumer + detection + persistence)
 - `backend/correlation/engine.py` (deterministic alert-to-incident correlation)
+- `backend/correlation/patterns.py` (multi-event attack pattern detection)
 - `backend/storage/db.py` and `backend/storage/models.py` (SQLAlchemy persistence)
 - `infrastructure/docker/docker-compose.yml` (API + worker + Kafka + Postgres + Redis)
 
@@ -55,6 +56,13 @@ Core SOC API endpoints:
 - `GET /alerts` returns generated alerts from PostgreSQL.
 - `GET /incidents` returns correlated incidents with aggregate counters.
 - `GET /incidents/{id}` returns incident details by id.
+
+Phase 3 correlation behavior:
+
+- Worker now runs both baseline detection and timeline correlation per event.
+- Correlation tracks a rolling 10-minute user timeline and detects sequence attacks.
+- Built-in patterns include account takeover, impossible travel in login chains, and post-compromise privilege escalation.
+- Correlated alerts include MITRE ATT&CK technique mappings in alert details.
 
 ## Services
 

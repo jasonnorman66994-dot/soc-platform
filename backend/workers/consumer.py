@@ -6,7 +6,7 @@ from kafka import KafkaConsumer
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 
-from correlation.engine import build_incident
+from correlation.engine import build_incident, correlate
 from detection.rules import detect
 from storage.db import SessionLocal, engine
 from storage.models import Alert, Base, Event, Incident
@@ -24,6 +24,37 @@ def _parse_timestamp(value) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _merge_alerts(baseline_alerts: list[dict], correlated_alerts: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for item in baseline_alerts:
+        normalized = dict(item)
+        normalized.setdefault("source", "detection")
+        signature = (
+            normalized.get("type", "detection"),
+            normalized.get("severity", "medium"),
+            normalized.get("source", "detection"),
+        )
+        if signature not in seen:
+            seen.add(signature)
+            merged.append(normalized)
+
+    for item in correlated_alerts:
+        normalized = dict(item)
+        normalized.setdefault("source", "correlation")
+        signature = (
+            normalized.get("type", "detection"),
+            normalized.get("severity", "medium"),
+            normalized.get("source", "correlation"),
+        )
+        if signature not in seen:
+            seen.add(signature)
+            merged.append(normalized)
+
+    return merged
+
+
 def run() -> None:
     Base.metadata.create_all(bind=engine)
 
@@ -38,7 +69,9 @@ def run() -> None:
 
     for message in consumer:
         event = message.value
-        alerts = detect(event)
+        baseline_alerts = detect(event)
+        correlated_alerts = correlate(event)
+        alerts = _merge_alerts(baseline_alerts, correlated_alerts)
 
         with SessionLocal() as db:
             event_row = Event(
