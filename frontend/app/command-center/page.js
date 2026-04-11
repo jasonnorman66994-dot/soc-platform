@@ -6,6 +6,22 @@ import { useEffect, useMemo, useState } from "react";
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
 const WS = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost/ws";
 
+function getDefaultScheduleForm() {
+  return {
+    name: "Weekly Board Report",
+    description: "Automated weekly board report export",
+    format: "markdown",
+    frequency: "weekly",
+    day_of_week: 1,
+    day_of_month: 1,
+    hour_of_day: 9,
+    window_days: 30,
+    incident_limit: 10,
+    recipients: "",
+    enabled: true,
+  };
+}
+
 export default function CommandCenterPage() {
   const [useDemoMode, setUseDemoMode] = useState(true);
   const [manualLogin, setManualLogin] = useState({ tenant: "", email: "", password: "", apiKey: "" });
@@ -31,19 +47,8 @@ export default function CommandCenterPage() {
   const [boardWindowDays, setBoardWindowDays] = useState("30");
   const [boardIncidentLimit, setBoardIncidentLimit] = useState("10");
   const [reportSchedules, setReportSchedules] = useState([]);
-  const [scheduleForm, setScheduleForm] = useState({
-    name: "Weekly Board Report",
-    description: "Automated weekly board report export",
-    format: "markdown",
-    frequency: "weekly",
-    day_of_week: 1,
-    day_of_month: 1,
-    hour_of_day: 9,
-    window_days: 30,
-    incident_limit: 10,
-    recipients: "",
-    enabled: true,
-  });
+  const [scheduleForm, setScheduleForm] = useState(getDefaultScheduleForm());
+  const [editingScheduleId, setEditingScheduleId] = useState(null);
 
   const authHeaders = useMemo(
     () => ({
@@ -352,19 +357,50 @@ export default function CommandCenterPage() {
     }
     setAdminError("");
     await loadReportSchedules();
+    setScheduleForm(getDefaultScheduleForm());
+  }
+
+  function beginEditSchedule(schedule) {
+    setEditingScheduleId(schedule.id);
     setScheduleForm({
-      name: "Weekly Board Report",
-      description: "Automated weekly board report export",
-      format: "markdown",
-      frequency: "weekly",
-      day_of_week: 1,
-      day_of_month: 1,
-      hour_of_day: 9,
-      window_days: 30,
-      incident_limit: 10,
-      recipients: "",
-      enabled: true,
+      name: schedule.name || "",
+      description: schedule.description || "",
+      format: schedule.format || "markdown",
+      frequency: schedule.frequency || "weekly",
+      day_of_week: typeof schedule.day_of_week === "number" ? schedule.day_of_week : null,
+      day_of_month: typeof schedule.day_of_month === "number" ? schedule.day_of_month : null,
+      hour_of_day: Number.isInteger(schedule.hour_of_day) ? schedule.hour_of_day : 9,
+      window_days: Number.isInteger(schedule.window_days) ? schedule.window_days : 30,
+      incident_limit: Number.isInteger(schedule.incident_limit) ? schedule.incident_limit : 10,
+      recipients: schedule.recipients || "",
+      enabled: !!schedule.enabled,
     });
+  }
+
+  function cancelEditSchedule() {
+    setEditingScheduleId(null);
+    setScheduleForm(getDefaultScheduleForm());
+  }
+
+  async function updateReportSchedule() {
+    if (!adminAccessToken || !editingScheduleId) return;
+    const res = await fetch(`${API}/admin/reports/schedules/${editingScheduleId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminAccessToken}`,
+      },
+      body: JSON.stringify(scheduleForm),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to update schedule");
+      return;
+    }
+    setAdminError("");
+    setEditingScheduleId(null);
+    setScheduleForm(getDefaultScheduleForm());
+    await loadReportSchedules();
   }
 
   async function deleteReportSchedule(scheduleId) {
@@ -589,7 +625,14 @@ export default function CommandCenterPage() {
               <option value="json">JSON</option>
             </select>
             <button style={btn} onClick={loadReportSchedules}>Load Schedules</button>
-            <button style={btn} onClick={createReportSchedule}>Create Schedule</button>
+            {editingScheduleId ? (
+              <button style={btn} onClick={updateReportSchedule}>Update Schedule</button>
+            ) : (
+              <button style={btn} onClick={createReportSchedule}>Create Schedule</button>
+            )}
+            {editingScheduleId ? (
+              <button style={btnSecondary} onClick={cancelEditSchedule}>Cancel Edit</button>
+            ) : null}
           </div>
           {reportSchedules.length > 0 && (
             <div style={{ marginTop: 10 }}>
@@ -599,6 +642,7 @@ export default function CommandCenterPage() {
                   <li key={s.id} style={{ ...row, cursor: "pointer", paddingRight: 6, alignItems: "center", justifyContent: "space-between" }}>
                     <span>{s.name} ({s.frequency} @ {s.hour_of_day}:00{typeof s.day_of_week === "number" ? `, dow ${s.day_of_week}` : ""}{typeof s.day_of_month === "number" ? `, dom ${s.day_of_month}` : ""}{s.next_run ? `, next ${new Date(s.next_run).toLocaleString()}` : ", paused"})</span>
                     <div style={{ display: "flex", gap: 6 }}>
+                      <button style={{ ...btnSecondary, padding: "4px 8px", fontSize: "12px" }} onClick={() => beginEditSchedule(s)}>Edit</button>
                       <button style={{ ...btnSecondary, padding: "4px 8px", fontSize: "12px" }} onClick={() => runReportSchedule(s.id)}>Run Now</button>
                       <button style={{ ...btnSecondary, padding: "4px 8px", fontSize: "12px", borderColor: s.enabled ? "#f59e0b" : "#22c55e", color: s.enabled ? "#f59e0b" : "#22c55e" }} onClick={() => toggleReportSchedule(s.id, s.enabled)}>{s.enabled ? "Pause" : "Resume"}</button>
                       <button style={{ ...btn, background: "#dc2626", padding: "4px 8px", fontSize: "12px" }} onClick={() => deleteReportSchedule(s.id)}>Delete</button>
