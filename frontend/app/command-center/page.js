@@ -74,6 +74,8 @@ export default function CommandCenterPage() {
   const [soarExecutionHistory, setSoarExecutionHistory] = useState([]);
   const [soarLastResult, setSoarLastResult] = useState(null);
   const [soarIncidentId, setSoarIncidentId] = useState("");
+  const [soarPolicy, setSoarPolicy] = useState(null);
+  const [soarPolicySaving, setSoarPolicySaving] = useState(false);
   const [liveSimulationStatus, setLiveSimulationStatus] = useState(null);
   const [liveSimulationForm, setLiveSimulationForm] = useState({ interval_seconds: 25, include_noise: true, rounds: 2 });
   const [executiveStory, setExecutiveStory] = useState(null);
@@ -108,6 +110,7 @@ export default function CommandCenterPage() {
   }, [useDemoMode]);
 
   useEffect(() => {
+    setSoarPolicy(null);
     if (!accessToken || !tenantId) return;
     fetchAlerts();
     fetchIncidents();
@@ -116,6 +119,7 @@ export default function CommandCenterPage() {
     loadAdvancedAnalytics();
     loadLiveSimulationStatus();
     loadExecutiveStory();
+    loadSoarPolicy();
 
     const ws = new WebSocket(`${WS}?tenant_id=${encodeURIComponent(tenantId)}&token=${encodeURIComponent(accessToken)}`);
     ws.onopen = () => setWsState("connected");
@@ -234,6 +238,84 @@ export default function CommandCenterPage() {
       setSoarExecutionHistory(Array.isArray(data?.executions) ? data.executions : []);
     } catch {
       // ignore
+    }
+  }
+
+  async function loadSoarPolicy() {
+    setSoarPolicy(null);
+    try {
+      const res = await fetch(`${API}/soar/policies`, { headers: authHeaders });
+      const data = await res.json();
+      if (!res.ok) {
+        setSoarPolicy(null);
+        setToast({ type: "error", message: data?.detail || "Failed to load SOAR policy" });
+        return;
+      }
+      setSoarPolicy(data?.policy || null);
+    } catch {
+      setSoarPolicy(null);
+      setToast({ type: "error", message: "Failed to load SOAR policy" });
+    }
+  }
+
+  function updateSoarPolicy(path, value) {
+    setSoarPolicy((prev) => {
+      if (!prev) return prev;
+      if (path.length === 1) {
+        return { ...prev, [path[0]]: value };
+      }
+      if (path.length === 3 && path[0] === "playbooks") {
+        const playbookName = path[1];
+        const field = path[2];
+        return {
+          ...prev,
+          playbooks: {
+            ...(prev.playbooks || {}),
+            [playbookName]: {
+              ...((prev.playbooks || {})[playbookName] || {}),
+              [field]: value,
+            },
+          },
+        };
+      }
+      return prev;
+    });
+  }
+
+  async function saveSoarPolicy() {
+    if (!soarPolicy || soarPolicySaving) return;
+    setSoarPolicySaving(true);
+    try {
+      const res = await fetch(`${API}/soar/policies`, {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({
+          auto_response_enabled: !!soarPolicy.auto_response_enabled,
+          default_risk_threshold: Number.parseInt(String(soarPolicy.default_risk_threshold || 0), 10),
+          playbooks: Object.fromEntries(
+            Object.entries(soarPolicy.playbooks || {}).map(([name, conf]) => [
+              name,
+              {
+                enabled: !!conf?.enabled,
+                min_risk: Number.parseInt(String(conf?.min_risk || 0), 10),
+              },
+            ])
+          ),
+          event_type_overrides: soarPolicy.event_type_overrides || {},
+          pattern_overrides: soarPolicy.pattern_overrides || {},
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setToast({ type: "error", message: data?.detail || "Failed to save SOAR policy" });
+        return;
+      }
+      setSoarPolicy(data?.policy || null);
+      setToast({ type: "success", message: "SOAR policy updated" });
+    } catch {
+      setToast({ type: "error", message: "Failed to save SOAR policy" });
+    } finally {
+      setSoarPolicySaving(false);
     }
   }
 
@@ -1233,6 +1315,69 @@ export default function CommandCenterPage() {
           <li style={row}><span>Action Count</span><span>{soarLastResult?.actions?.length ?? 0}</span></li>
           <li style={row}><span>History Entries</span><span>{soarExecutionHistory.length}</span></li>
         </ul>
+      </section>
+
+      <section style={{ ...card, marginTop: 16 }}>
+        <h3 style={h3}>SOAR Playbook Policy</h3>
+        {soarPolicy ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#cbd5e1" }}>
+                <input
+                  type="checkbox"
+                  checked={!!soarPolicy.auto_response_enabled}
+                  onChange={(e) => updateSoarPolicy(["auto_response_enabled"], e.target.checked)}
+                />
+                Auto-response enabled
+              </label>
+              <input
+                style={input}
+                type="number"
+                min="0"
+                max="100"
+                placeholder="Default risk threshold"
+                value={soarPolicy.default_risk_threshold ?? 85}
+                onChange={(e) => updateSoarPolicy(["default_risk_threshold"], Number.parseInt(e.target.value || "0", 10))}
+              />
+              <button style={btn} onClick={saveSoarPolicy} disabled={soarPolicySaving}>
+                {soarPolicySaving ? "Saving Policy..." : "Save SOAR Policy"}
+              </button>
+              <button style={btnSecondary} onClick={loadSoarPolicy}>Reload Policy</button>
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <h4 style={{ margin: 0, color: "#cbd5e1" }}>Per-Playbook Controls</h4>
+              <ul style={{ ...list, marginTop: 8 }}>
+                {Object.entries(soarPolicy.playbooks || {}).map(([name, conf]) => (
+                  <li key={name} style={{ ...row, display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 8, alignItems: "center" }}>
+                    <span style={{ textTransform: "capitalize" }}>{name.replaceAll("_", " ")}</span>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#cbd5e1" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!conf?.enabled}
+                        onChange={(e) => updateSoarPolicy(["playbooks", name, "enabled"], e.target.checked)}
+                      />
+                      Enabled
+                    </label>
+                    <input
+                      style={input}
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={conf?.min_risk ?? 85}
+                      onChange={(e) => updateSoarPolicy(["playbooks", name, "min_risk"], Number.parseInt(e.target.value || "0", 10))}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
+        ) : (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ color: "#94a3b8" }}>Policy not loaded yet.</span>
+            <button style={btnSecondary} onClick={loadSoarPolicy}>Load SOAR Policy</button>
+          </div>
+        )}
       </section>
 
       <section style={{ ...card, marginTop: 16 }}>

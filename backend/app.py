@@ -306,7 +306,18 @@ except (ValueError, TypeError):
     AUTO_RESPONSE_RISK_THRESHOLD = 85
 
 
-def _select_playbook_title(patterns: list[str], event_type: str | None) -> str:
+def _select_playbook_title(patterns: list[str], event_type: str | None, policy: dict | None = None) -> str:
+    active_policy = policy if isinstance(policy, dict) else _normalize_soar_policy(policy)
+    pattern_overrides = active_policy.get("pattern_overrides") or {}
+    for pattern in patterns:
+        candidate = pattern_overrides.get(pattern)
+        if candidate in VALID_PLAYBOOK_TYPES:
+            return candidate
+
+    event_overrides = active_policy.get("event_type_overrides") or {}
+    if event_type and event_overrides.get(event_type) in VALID_PLAYBOOK_TYPES:
+        return event_overrides[event_type]
+
     if "ACCOUNT_TAKEOVER" in patterns:
         return "account_takeover"
     if "IMPOSSIBLE_TRAVEL_CHAIN" in patterns:
@@ -318,23 +329,49 @@ def _select_playbook_title(patterns: list[str], event_type: str | None) -> str:
     return "generic_alert"
 
 
-def _should_auto_respond(incident_row: dict | None, risk_score: int, patterns: list[str]) -> bool:
+def _should_auto_respond(
+    incident_row: dict | None,
+    risk_score: int,
+    patterns: list[str],
+    playbook_title: str,
+    policy: dict | None = None,
+) -> bool:
+    active_policy = policy if isinstance(policy, dict) else _normalize_soar_policy(policy)
     if not AUTO_RESPONSE_ENABLED or not incident_row:
+        return False
+    if not active_policy.get("auto_response_enabled", True):
         return False
     if (incident_row.get("status") or "").lower() in {"responded", "closed", "resolved"}:
         return False
     if incident_row.get("responded_at"):
         return False
-    if risk_score >= AUTO_RESPONSE_RISK_THRESHOLD:
+
+    playbook_policy = (active_policy.get("playbooks") or {}).get(playbook_title, {})
+    if isinstance(playbook_policy, dict) and playbook_policy.get("enabled") is False:
+        return False
+
+    threshold = active_policy.get("default_risk_threshold", AUTO_RESPONSE_RISK_THRESHOLD)
+    if isinstance(playbook_policy, dict) and isinstance(playbook_policy.get("min_risk"), int):
+        threshold = playbook_policy.get("min_risk")
+
+    if risk_score >= max(0, min(int(threshold), 100)):
         return True
     return any(item in {"ACCOUNT_TAKEOVER", "IMPOSSIBLE_TRAVEL_CHAIN"} for item in patterns)
 
 
-def _build_playbook_inputs(incident_row: dict, payload: dict, patterns: list[str], risk_score: int) -> tuple[dict, dict]:
+def _build_playbook_inputs(
+    incident_row: dict,
+    payload: dict,
+    patterns: list[str],
+    risk_score: int,
+    playbook_title: str | None = None,
+    policy: dict | None = None,
+) -> tuple[dict, dict]:
     event_type = payload.get("event_type")
+    selected_playbook = playbook_title or _select_playbook_title(patterns, event_type, policy)
     incident_payload = {
         "id": incident_row.get("id"),
-        "title": _select_playbook_title(patterns, event_type),
+        "title": selected_playbook,
         "severity": incident_row.get("severity") or "medium",
         "status": incident_row.get("status") or "open",
         "context": {
@@ -584,12 +621,15 @@ RATE_LIMITS: dict[str, list[datetime]] = {}
 RULES_DIR = Path(__file__).parent / "rules"
 LIVE_SIMULATION_TASKS: dict[str, asyncio.Task] = {}
 LIVE_SIMULATION_STATE: dict[str, dict[str, Any]] = {}
+SOAR_POLICY_CACHE: dict[str, dict[str, Any]] = {}
+SOAR_POLICY_CACHE_TTL_SECONDS = 30
 
 ROLE_ORDER = {"viewer": 1, "analyst": 2, "admin": 3, "owner": 4}
 VALID_PLANS = {"free", "pro", "enterprise"}
 VALID_LEAD_SOURCES = {"landing", "webinar", "partner", "unknown"}
 VALID_REPORT_SCHEDULE_FORMATS = {"markdown", "json"}
 VALID_REPORT_SCHEDULE_FREQUENCIES = {"daily", "weekly", "monthly"}
+VALID_PLAYBOOK_TYPES = {"account_takeover", "suspicious_ip", "phishing", "data_exfiltration", "generic_alert"}
 ADMIN_SESSION_ALG = "HS256"
 SECURITY_WARNINGS: list[str] = []
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -776,8 +816,153 @@ class ReportScheduleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PlaybookPolicyPatch(BaseModel):
+    enabled: bool | None = None
+    min_risk: int | None = Field(default=None, ge=0, le=100)
+
+
+class SoarPolicyUpdateBody(BaseModel):
+    auto_response_enabled: bool | None = None
+    default_risk_threshold: int | None = Field(default=None, ge=0, le=100)
+    playbooks: dict[str, PlaybookPolicyPatch] | None = None
+    event_type_overrides: dict[str, str] | None = None
+    pattern_overrides: dict[str, str] | None = None
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _default_soar_policy() -> dict:
+    return {
+        "auto_response_enabled": AUTO_RESPONSE_ENABLED,
+        "default_risk_threshold": AUTO_RESPONSE_RISK_THRESHOLD,
+        "playbooks": {
+            "account_takeover": {"enabled": True, "min_risk": 70},
+            "suspicious_ip": {"enabled": True, "min_risk": 80},
+            "phishing": {"enabled": True, "min_risk": 85},
+            "data_exfiltration": {"enabled": True, "min_risk": 75},
+            "generic_alert": {"enabled": False, "min_risk": 95},
+        },
+        "event_type_overrides": {
+            "data_exfil": "data_exfiltration",
+            "email": "phishing",
+            "email_click": "phishing",
+        },
+        "pattern_overrides": {
+            "ACCOUNT_TAKEOVER": "account_takeover",
+            "IMPOSSIBLE_TRAVEL_CHAIN": "suspicious_ip",
+        },
+    }
+
+
+def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
+    default = _default_soar_policy()
+    candidate = {}
+    if isinstance(raw_policy, dict):
+        candidate = raw_policy
+    elif isinstance(raw_policy, str):
+        try:
+            parsed_policy = json.loads(raw_policy)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_policy = {}
+        candidate = parsed_policy if isinstance(parsed_policy, dict) else {}
+
+    auto_response_enabled = candidate.get("auto_response_enabled")
+    if not isinstance(auto_response_enabled, bool):
+        auto_response_enabled = default["auto_response_enabled"]
+
+    default_risk_threshold = candidate.get("default_risk_threshold")
+    if not isinstance(default_risk_threshold, int):
+        default_risk_threshold = default["default_risk_threshold"]
+    default_risk_threshold = max(0, min(default_risk_threshold, 100))
+
+    playbooks_in = candidate.get("playbooks") if isinstance(candidate.get("playbooks"), dict) else {}
+    playbooks = {}
+    for name, base in default["playbooks"].items():
+        requested = playbooks_in.get(name) if isinstance(playbooks_in.get(name), dict) else {}
+        enabled = requested.get("enabled") if isinstance(requested.get("enabled"), bool) else base["enabled"]
+        min_risk = requested.get("min_risk") if isinstance(requested.get("min_risk"), int) else base["min_risk"]
+        playbooks[name] = {
+            "enabled": enabled,
+            "min_risk": max(0, min(min_risk, 100)),
+        }
+
+    event_type_overrides = dict(default["event_type_overrides"])
+    if isinstance(candidate.get("event_type_overrides"), dict):
+        for key, value in candidate["event_type_overrides"].items():
+            if isinstance(key, str) and isinstance(value, str) and value in VALID_PLAYBOOK_TYPES:
+                event_type_overrides[key] = value
+
+    pattern_overrides = dict(default["pattern_overrides"])
+    if isinstance(candidate.get("pattern_overrides"), dict):
+        for key, value in candidate["pattern_overrides"].items():
+            if isinstance(key, str) and isinstance(value, str) and value in VALID_PLAYBOOK_TYPES:
+                pattern_overrides[key] = value
+
+    return {
+        "auto_response_enabled": auto_response_enabled,
+        "default_risk_threshold": default_risk_threshold,
+        "playbooks": playbooks,
+        "event_type_overrides": event_type_overrides,
+        "pattern_overrides": pattern_overrides,
+    }
+
+
+def _get_or_create_soar_policy(tenant_id: str) -> dict:
+    created_policy = _default_soar_policy()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT config FROM soar_policies WHERE tenant_id=%s", (tenant_id,))
+            row = cur.fetchone()
+            if row is not None and row.get("config") is not None:
+                return _normalize_soar_policy(row.get("config"))
+
+            cur.execute(
+                """
+                INSERT INTO soar_policies (tenant_id, config)
+                VALUES (%s, %s)
+                ON CONFLICT (tenant_id) DO NOTHING
+                """,
+                (tenant_id, json.dumps(created_policy)),
+            )
+        conn.commit()
+    return _normalize_soar_policy(created_policy)
+
+
+def _save_soar_policy(tenant_id: str, policy: dict) -> dict:
+    normalized = _normalize_soar_policy(policy)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO soar_policies (tenant_id, config, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (tenant_id)
+                DO UPDATE SET config=EXCLUDED.config, updated_at=NOW()
+                RETURNING config
+                """,
+                (tenant_id, json.dumps(normalized)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    saved = _normalize_soar_policy((row or {}).get("config"))
+    SOAR_POLICY_CACHE[tenant_id] = {"policy": saved, "cached_at": now_utc()}
+    return saved
+
+
+def _get_cached_soar_policy(tenant_id: str) -> dict:
+    cached = SOAR_POLICY_CACHE.get(tenant_id)
+    if cached:
+        cached_at = cached.get("cached_at")
+        if isinstance(cached_at, datetime):
+            age_seconds = (now_utc() - cached_at).total_seconds()
+            if age_seconds <= SOAR_POLICY_CACHE_TTL_SECONDS and isinstance(cached.get("policy"), dict):
+                return cached["policy"]
+
+    policy = _get_or_create_soar_policy(tenant_id)
+    SOAR_POLICY_CACHE[tenant_id] = {"policy": policy, "cached_at": now_utc()}
+    return policy
 
 
 def compute_next_report_run(
@@ -1057,6 +1242,12 @@ def init_db():
                     last_run TIMESTAMPTZ,
                     next_run TIMESTAMPTZ,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS soar_policies (
+                    tenant_id TEXT PRIMARY KEY,
+                    config JSONB NOT NULL,
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
@@ -2345,8 +2536,10 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
             for item in alert_rows
         ]
         risk_score = _calculate_context_risk(context, user_alerts, patterns)
+        active_soar_policy = _get_cached_soar_policy(tenant_id)
+        selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
 
-        if _should_auto_respond(incident_row, risk_score, patterns):
+        if _should_auto_respond(incident_row, risk_score, patterns, selected_playbook, active_soar_policy):
             # Atomically claim the incident for auto-response to prevent concurrent duplicates
             claimed_for_response = False
             previous_incident_status = (incident_row.get("status") or "open") if incident_row else "open"
@@ -2370,7 +2563,14 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                     incident_row["status"] = "responding"
 
             if claimed_for_response:
-                incident_payload, event_payload = _build_playbook_inputs(incident_row, payload, patterns, risk_score)
+                incident_payload, event_payload = _build_playbook_inputs(
+                    incident_row,
+                    payload,
+                    patterns,
+                    risk_score,
+                    selected_playbook,
+                    active_soar_policy,
+                )
                 playbook_result = execute_playbook_for_incident(incident_payload, event_payload)
                 playbook_status = playbook_result.get("status", "unknown")
 
@@ -2753,8 +2953,15 @@ def automate_incident_response(
         if "impossible_travel" in story or "impossible travel" in story:
             patterns.append("IMPOSSIBLE_TRAVEL_CHAIN")
 
+    active_soar_policy = _get_cached_soar_policy(tenant_id)
+    selected_playbook = _select_playbook_title(patterns, payload.get("event_type"), active_soar_policy)
     incident_payload, event_payload = _build_playbook_inputs(
-        incident_row, payload, patterns, 0
+        incident_row,
+        payload,
+        patterns,
+        0,
+        selected_playbook,
+        active_soar_policy,
     )
     result = execute_playbook_for_incident(incident_payload, event_payload)
 
@@ -2841,6 +3048,57 @@ def get_soar_execution_history(
         "execution_count": len(history),
         "executions": history,
     }
+
+
+@app.get("/soar/policies")
+def get_soar_policies(
+    tenant_id: str = Depends(get_tenant),
+    _user=Depends(require_action("respond")),
+):
+    policy = _get_or_create_soar_policy(tenant_id)
+    return {"tenant_id": tenant_id, "policy": policy}
+
+
+@app.put("/soar/policies")
+def update_soar_policies(
+    body: SoarPolicyUpdateBody,
+    tenant_id: str = Depends(get_tenant),
+    user=Depends(require_action("respond")),
+):
+    merged = _get_or_create_soar_policy(tenant_id)
+
+    if body.auto_response_enabled is not None:
+        merged["auto_response_enabled"] = body.auto_response_enabled
+    if body.default_risk_threshold is not None:
+        merged["default_risk_threshold"] = body.default_risk_threshold
+
+    if body.playbooks:
+        for name, patch in body.playbooks.items():
+            if name not in VALID_PLAYBOOK_TYPES:
+                raise HTTPException(status_code=400, detail=f"Unknown playbook type: {name}")
+            target = merged["playbooks"].setdefault(name, {"enabled": True, "min_risk": merged["default_risk_threshold"]})
+            if patch.enabled is not None:
+                target["enabled"] = patch.enabled
+            if patch.min_risk is not None:
+                target["min_risk"] = patch.min_risk
+
+    if body.event_type_overrides is not None:
+        merged["event_type_overrides"].clear()
+        for event_type, playbook in body.event_type_overrides.items():
+            if playbook not in VALID_PLAYBOOK_TYPES:
+                raise HTTPException(status_code=400, detail=f"Invalid event_type override target: {playbook}")
+            merged["event_type_overrides"][event_type] = playbook
+
+    if body.pattern_overrides is not None:
+        merged["pattern_overrides"].clear()
+        for pattern, playbook in body.pattern_overrides.items():
+            if playbook not in VALID_PLAYBOOK_TYPES:
+                raise HTTPException(status_code=400, detail=f"Invalid pattern override target: {playbook}")
+            merged["pattern_overrides"][pattern] = playbook
+
+    saved = _save_soar_policy(tenant_id, merged)
+    log_action(tenant_id, user["id"], "soar.policy_update", "soar/policies", {"updated": True})
+    return {"tenant_id": tenant_id, "policy": saved}
 
 
 @app.put("/incidents/{incident_id}/status")
