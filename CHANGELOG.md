@@ -25,6 +25,9 @@
 - Command Center schedule panel now shows live summary counters for total, enabled, paused, and due-now schedules.
 - Added modular SOC scaffold directories for ingestion, detection, correlation, workers, frontend dashboard components, and infrastructure layers.
 - Added a runnable ingestion service prototype at `backend/ingestion/server.py` with `POST /ingest` and `GET /events`, wired to simple detection rules in `backend/detection/rules.py`.
+- Added production SOC core components: Kafka producer (`backend/ingestion/producer.py`), stream worker (`backend/workers/consumer.py`), and SQLAlchemy storage layer (`backend/storage/*`).
+- Added production-ready API service at `backend/api/server.py` with event queue ingest and persisted events/alerts query endpoints.
+- Added dedicated phase-2 orchestration stack at `infrastructure/docker/docker-compose.yml` (API, worker, Kafka, Zookeeper, PostgreSQL, Redis).
 
 ### Changed
 
