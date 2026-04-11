@@ -383,6 +383,52 @@ export default function CommandCenterPage() {
     await loadReportSchedules();
   }
 
+  async function runReportSchedule(scheduleId) {
+    if (!adminAccessToken) return;
+    const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}/run`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${adminAccessToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAdminError(data?.detail || "Failed to run schedule");
+      return;
+    }
+
+    if (data?.report?.generated_at) {
+      setAdminBoardReport(data.report);
+    }
+
+    if (data?.format === "markdown" && data?.content) {
+      const blob = new Blob([data.content], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `board-report-schedule-${scheduleId}.md`;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    if (data?.format === "json" && data?.report) {
+      const blob = new Blob([JSON.stringify(data.report, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `board-report-schedule-${scheduleId}.json`;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    setAdminError("");
+    await loadReportSchedules();
+  }
+
   return (
     <main style={{ minHeight: "100vh", padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -536,7 +582,10 @@ export default function CommandCenterPage() {
                 {reportSchedules.map((s) => (
                   <li key={s.id} style={{ ...row, cursor: "pointer", paddingRight: 6, alignItems: "center", justifyContent: "space-between" }}>
                     <span>{s.name} ({s.frequency} @ {s.hour_of_day}:00{typeof s.day_of_week === "number" ? `, dow ${s.day_of_week}` : ""}{typeof s.day_of_month === "number" ? `, dom ${s.day_of_month}` : ""}{s.next_run ? `, next ${new Date(s.next_run).toLocaleString()}` : ", paused"})</span>
-                    <button style={{ ...btn, background: "#dc2626", padding: "4px 8px", fontSize: "12px" }} onClick={() => deleteReportSchedule(s.id)}>Delete</button>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button style={{ ...btnSecondary, padding: "4px 8px", fontSize: "12px" }} onClick={() => runReportSchedule(s.id)}>Run Now</button>
+                      <button style={{ ...btn, background: "#dc2626", padding: "4px 8px", fontSize: "12px" }} onClick={() => deleteReportSchedule(s.id)}>Delete</button>
+                    </div>
                   </li>
                 ))}
               </ul>

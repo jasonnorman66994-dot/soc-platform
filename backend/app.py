@@ -35,6 +35,123 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 app = FastAPI(title="SOC API Gateway", version="1.0.0")
 
+
+def render_board_report_markdown(report: dict) -> str:
+    incidents = report["incident_summary"]
+    tenants = report["tenant_summary"]
+    commercial = report["commercial_summary"]
+    webhook_lines = report["webhook_summary_last_window"]
+    recent_lines = report["recent_incidents"]
+
+    markdown = [
+        "# Board Report",
+        "",
+        f"Generated: {report['generated_at']}",
+        f"Window: last {report['window_days']} days",
+        "",
+        "## Platform KPIs",
+        f"- Total tenants: {tenants['total_tenants']}",
+        f"- Active tenants: {tenants['active_tenants']}",
+        f"- Trialing tenants: {tenants['trialing_tenants']}",
+        f"- Past due tenants: {tenants['past_due_tenants']}",
+        "",
+        "## Security Operations",
+        f"- Total incidents: {incidents['total_incidents']}",
+        f"- Open incidents: {incidents['open_incidents']}",
+        f"- Critical incidents: {incidents['critical_incidents']}",
+        f"- High incidents: {incidents['high_incidents']}",
+        f"- MTTD seconds: {incidents['mttd_seconds']:.2f}",
+        f"- MTTR seconds: {incidents['mttr_seconds']:.2f}",
+        "",
+        "## Commercial Funnel",
+        f"- Total leads: {commercial['total_leads']}",
+        f"- Converted signups: {commercial['converted_signups']}",
+        f"- Conversion rate: {commercial['conversion_rate']:.2%}",
+        "",
+        "## Top Lead Sources",
+    ]
+
+    for row in commercial["by_source"][:5]:
+        markdown.append(f"- {row['source']}: {row['count']} leads / {row['converted'] or 0} converted")
+
+    markdown.extend(["", "## Webhook Health"])
+    if webhook_lines:
+        for row in webhook_lines:
+            reason = f" ({row['reason']})" if row.get("reason") else ""
+            markdown.append(f"- {row['status']}{reason}: {row['count']}")
+    else:
+        markdown.append("- No webhook activity recorded in this window")
+
+    markdown.extend(["", "## Recent Incidents"])
+    if recent_lines:
+        for row in recent_lines:
+            markdown.append(
+                f"- [{row['severity']}/{row['status']}] {row['tenant_id']} :: {row['entity']} :: assigned to {row['assigned_to'] or 'unassigned'}"
+            )
+    else:
+        markdown.append("- No incidents recorded in this window")
+
+    return "\n".join(markdown) + "\n"
+
+
+def get_report_schedule_row(cur, schedule_id: int) -> dict:
+    cur.execute(
+        """
+        SELECT id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
+               window_days, incident_limit, recipients, enabled, last_run, next_run,
+               created_at, updated_at
+        FROM report_schedules
+        WHERE id = %s
+        """,
+        (schedule_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return row
+
+
+def run_report_schedule_export(cur, schedule_id: int) -> dict:
+    schedule = get_report_schedule_row(cur, schedule_id)
+    report = build_board_report(
+        window_days=schedule["window_days"],
+        incident_limit=schedule["incident_limit"],
+    )
+    executed_at = now_utc()
+    next_run = (
+        compute_next_report_run(
+            frequency=schedule["frequency"],
+            hour_of_day=schedule["hour_of_day"],
+            day_of_week=schedule.get("day_of_week"),
+            day_of_month=schedule.get("day_of_month"),
+            reference_time=executed_at,
+        )
+        if schedule["enabled"]
+        else None
+    )
+
+    cur.execute(
+        """
+        UPDATE report_schedules
+        SET last_run = %s,
+            next_run = %s,
+            updated_at = NOW()
+        WHERE id = %s
+        RETURNING id, name, description, format, frequency, day_of_week, day_of_month, hour_of_day,
+                  window_days, incident_limit, recipients, enabled, last_run, next_run,
+                  created_at, updated_at
+        """,
+        (executed_at, next_run, schedule_id),
+    )
+    updated_schedule = cur.fetchone()
+
+    return {
+        "schedule": ReportScheduleResponse(**updated_schedule).model_dump(mode="json"),
+        "format": schedule["format"],
+        "report": report,
+        "content": render_board_report_markdown(report) if schedule["format"] == "markdown" else None,
+    }
+
 rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 clients: list[dict] = []
 RATE_LIMITS: dict[str, list[datetime]] = {}
@@ -1659,62 +1776,8 @@ def get_board_report(window_days: int = 30, incident_limit: int = 10, _admin=Dep
 @app.get("/admin/reports/board.md")
 def get_board_report_markdown(window_days: int = 30, incident_limit: int = 10, _admin=Depends(require_internal_admin_token)):
     report = build_board_report(window_days=window_days, incident_limit=incident_limit)
-    incidents = report["incident_summary"]
-    tenants = report["tenant_summary"]
-    commercial = report["commercial_summary"]
-    webhook_lines = report["webhook_summary_last_window"]
-    recent_lines = report["recent_incidents"]
-
-    markdown = [
-        "# Board Report",
-        "",
-        f"Generated: {report['generated_at']}",
-        f"Window: last {report['window_days']} days",
-        "",
-        "## Platform KPIs",
-        f"- Total tenants: {tenants['total_tenants']}",
-        f"- Active tenants: {tenants['active_tenants']}",
-        f"- Trialing tenants: {tenants['trialing_tenants']}",
-        f"- Past due tenants: {tenants['past_due_tenants']}",
-        "",
-        "## Security Operations",
-        f"- Total incidents: {incidents['total_incidents']}",
-        f"- Open incidents: {incidents['open_incidents']}",
-        f"- Critical incidents: {incidents['critical_incidents']}",
-        f"- High incidents: {incidents['high_incidents']}",
-        f"- MTTD seconds: {incidents['mttd_seconds']:.2f}",
-        f"- MTTR seconds: {incidents['mttr_seconds']:.2f}",
-        "",
-        "## Commercial Funnel",
-        f"- Total leads: {commercial['total_leads']}",
-        f"- Converted signups: {commercial['converted_signups']}",
-        f"- Conversion rate: {commercial['conversion_rate']:.2%}",
-        "",
-        "## Top Lead Sources",
-    ]
-
-    for row in commercial["by_source"][:5]:
-        markdown.append(f"- {row['source']}: {row['count']} leads / {row['converted'] or 0} converted")
-
-    markdown.extend(["", "## Webhook Health"])
-    if webhook_lines:
-        for row in webhook_lines:
-            reason = f" ({row['reason']})" if row.get("reason") else ""
-            markdown.append(f"- {row['status']}{reason}: {row['count']}")
-    else:
-        markdown.append("- No webhook activity recorded in this window")
-
-    markdown.extend(["", "## Recent Incidents"])
-    if recent_lines:
-        for row in recent_lines:
-            markdown.append(
-                f"- [{row['severity']}/{row['status']}] {row['tenant_id']} :: {row['entity']} :: assigned to {row['assigned_to'] or 'unassigned'}"
-            )
-    else:
-        markdown.append("- No incidents recorded in this window")
-
     return PlainTextResponse(
-        content="\n".join(markdown) + "\n",
+        content=render_board_report_markdown(report),
         media_type="text/markdown",
         headers={"Content-Disposition": 'attachment; filename="board-report.md"'},
     )
@@ -1876,6 +1939,16 @@ def delete_report_schedule(schedule_id: int, _admin=Depends(require_internal_adm
                 raise HTTPException(status_code=404, detail="Schedule not found")
             conn.commit()
             return {"success": True, "message": f"Schedule {schedule_id} deleted"}
+
+
+@app.post("/admin/reports/schedules/{schedule_id}/run")
+def run_report_schedule(schedule_id: int, _admin=Depends(require_internal_admin_token)):
+    """Execute a configured board report schedule immediately and advance timestamps."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            result = run_report_schedule_export(cur, schedule_id)
+            conn.commit()
+            return result
 
 
 @app.get("/admin/leads")
