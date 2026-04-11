@@ -240,7 +240,7 @@ Command Center support:
 - **Admin Operations Panel** now includes Board Report Export Schedule section.
 - Input fields for schedule name, frequency, day-of-week or day-of-month, hour, report format, and immediate CRUD controls.
 - `Load Board Report` and `Download Board Report` use parameter inputs and clamp to safe ranges.
-- Active schedules listed with run-now and delete controls plus computed next-run visibility.
+- Active schedules listed with run-now, pause/resume toggle, and delete controls plus computed next-run visibility.
 
 ## Founder Assets
 
