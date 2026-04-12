@@ -1,0 +1,8 @@
+{
+    "python.defaultInterpreterPath": "/usr/local/python/3.12.1/bin/python",
+    "python.pythonPath": "/usr/local/python/3.12.1/bin/python",
+    "python.analysis.extraPaths": [
+        "/usr/local/python/3.12.1/lib/python3.12/site-packages",
+        "./backend"
+    ]
+}

@@ -119,6 +119,8 @@ def collect_network_events():
 
 def send_heartbeat(api_url, headers):
     """Send a heartbeat event so the Command Center knows we're alive."""
+    if requests is None:
+        return
     payload = [{
         "agent_id": AGENT_ID,
         "hostname": HOSTNAME,
@@ -132,16 +134,24 @@ def send_heartbeat(api_url, headers):
         "meta": {"platform": platform.system(), "version": "1.0.0"},
     }]
     try:
-        resp = requests.post(f"{api_url}/telemetry/ingest", json=payload, headers=headers, timeout=10)
+        resp = requests.post(
+            f"{api_url}/telemetry/ingest", json=payload, headers=headers, timeout=10
+        )
         resp.raise_for_status()
         log.info("Heartbeat sent — agents active: %s", resp.json().get("agents_active"))
-    except Exception as exc:
+    except requests.exceptions.Timeout:
+        log.warning("Heartbeat timed out.")
+    except requests.exceptions.ConnectionError as exc:
+        log.warning("Heartbeat connection error: %s", exc)
+    except requests.exceptions.HTTPError as exc:
+        log.warning("Heartbeat HTTP error: %s", exc)
+    except requests.exceptions.RequestException as exc:
         log.warning("Heartbeat failed: %s", exc)
 
 
 def send_events(api_url, headers, events):
     """Post collected events to the telemetry ingest endpoint."""
-    if not events:
+    if requests is None or not events:
         return
     try:
         resp = requests.post(f"{api_url}/telemetry/ingest", json=events, headers=headers, timeout=15)
@@ -152,7 +162,13 @@ def send_events(api_url, headers, events):
             data.get("processed", 0),
             data.get("threat_matches", 0),
         )
-    except Exception as exc:
+    except requests.exceptions.Timeout:
+        log.warning("Send timed out for %d events.", len(events))
+    except requests.exceptions.ConnectionError as exc:
+        log.warning("Connection error sending %d events: %s", len(events), exc)
+    except requests.exceptions.HTTPError as exc:
+        log.warning("HTTP error sending %d events: %s", len(events), exc)
+    except requests.exceptions.RequestException as exc:
         log.warning("Failed to send %d events: %s", len(events), exc)
 
 
@@ -204,7 +220,7 @@ def main():
         except KeyboardInterrupt:
             log.info("Agent shutting down.")
             break
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             log.error("Agent loop error: %s", exc)
             time.sleep(args.interval)
 
