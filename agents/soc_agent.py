@@ -9,6 +9,7 @@ Usage:
     python soc_agent.py \
         --api-url http://localhost:8000 \
         --api-key YOUR_API_KEY \
+        --tenant-id YOUR_TENANT_ID \
         --interval 15
 
 Requires: psutil, requests
@@ -176,6 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description="SOC Distributed Agent")
     parser.add_argument("--api-url", default=os.getenv("SOC_API_URL", "http://localhost:8000"), help="Command Center API URL")
     parser.add_argument("--api-key", default=os.getenv("SOC_API_KEY", ""), help="API key for authentication")
+    parser.add_argument("--tenant-id", default=os.getenv("SOC_TENANT_ID", ""), help="Tenant ID for authentication")
     parser.add_argument("--interval", type=int, default=int(os.getenv("SOC_AGENT_INTERVAL", "15")), help="Poll interval in seconds")
     args = parser.parse_args()
 
@@ -187,11 +189,14 @@ def main():
     if not args.api_key.strip():
         log.error("API key is required. Provide --api-key or set SOC_API_KEY.")
         return
+    if not args.tenant_id.strip():
+        log.error("Tenant ID is required. Provide --tenant-id or set SOC_TENANT_ID.")
+        return
 
     headers = {
         "Content-Type": "application/json",
         "X-API-Key": args.api_key,
-        "X-Tenant-Id": os.getenv("SOC_TENANT_ID", "default"),
+        "X-Tenant-Id": args.tenant_id,
     }
 
     log.info("SOC Agent %s starting on %s — polling every %ds", AGENT_ID, HOSTNAME, args.interval)
