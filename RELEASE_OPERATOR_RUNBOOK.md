@@ -80,3 +80,14 @@ Then check nightly resilience status and artifacts:
 1. Re-run release verifier with `powershell -ExecutionPolicy Bypass -File .\scripts\release-verify-ci.ps1`.
 
 1. Capture incident notes and update changelog.
+
+## SOC Agent Tuning Rollback
+
+If distributed telemetry volume spikes or ingest retries become noisy after release, roll agent tuning back to defaults:
+
+1. Set these environment values where agents run:
+	`SOC_AGENT_BATCH_SIZE=100`, `SOC_AGENT_MAX_RETRIES=2`, `SOC_AGENT_RETRY_BASE_DELAY=1.0`, `SOC_AGENT_RETRY_MAX_DELAY=8.0`.
+
+1. Restart agent processes.
+
+1. Confirm stabilization by checking reduced retry warnings and expected ingest throughput.

@@ -6,8 +6,26 @@ import { useEffect, useMemo, useState } from "react";
 import Timeline from "../../components/Timeline";
 import { replayTimeline } from "../../lib/timelineReplay";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
-const WS = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost/ws";
+function resolveApiUrl() {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  if (typeof window !== "undefined") {
+    return `${window.location.origin}/api`;
+  }
+  return "http://localhost/api";
+}
+
+function resolveWsUrl() {
+  if (process.env.NEXT_PUBLIC_WS_URL) {
+    return process.env.NEXT_PUBLIC_WS_URL;
+  }
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${protocol}://${window.location.host}/ws`;
+  }
+  return "ws://localhost/ws";
+}
 
 function getDefaultScheduleForm() {
   return {
@@ -52,6 +70,9 @@ function deriveVoiceIntent(transcript) {
 }
 
 export default function CommandCenterPage() {
+  const API = useMemo(() => resolveApiUrl(), []);
+  const WS = useMemo(() => resolveWsUrl(), []);
+
   const [useDemoMode, setUseDemoMode] = useState(true);
   const [manualLogin, setManualLogin] = useState({ tenant: "", email: "", password: "", apiKey: "" });
   const [loginError, setLoginError] = useState("");
