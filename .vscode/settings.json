@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "/home/codespace/.python/current/bin/python",
+    "python.pythonPath": "/home/codespace/.python/current/bin/python",
+    "python.analysis.extraPaths": [
+        "/home/codespace/.local/lib/python3.12/site-packages",
+        "/usr/local/python/3.12.1/lib/python3.12/site-packages",
+        "./backend"
+    ]
+}

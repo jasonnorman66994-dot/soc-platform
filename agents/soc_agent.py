@@ -9,6 +9,7 @@ Usage:
     python soc_agent.py \
         --api-url http://localhost:8000 \
         --api-key YOUR_API_KEY \
+        --tenant-id YOUR_TENANT_ID \
         --interval 15
 
 Requires: psutil, requests
@@ -119,6 +120,8 @@ def collect_network_events():
 
 def send_heartbeat(api_url, headers):
     """Send a heartbeat event so the Command Center knows we're alive."""
+    if requests is None:
+        return
     payload = [{
         "agent_id": AGENT_ID,
         "hostname": HOSTNAME,
@@ -132,16 +135,24 @@ def send_heartbeat(api_url, headers):
         "meta": {"platform": platform.system(), "version": "1.0.0"},
     }]
     try:
-        resp = requests.post(f"{api_url}/telemetry/ingest", json=payload, headers=headers, timeout=10)
+        resp = requests.post(
+            f"{api_url}/telemetry/ingest", json=payload, headers=headers, timeout=10
+        )
         resp.raise_for_status()
         log.info("Heartbeat sent — agents active: %s", resp.json().get("agents_active"))
-    except Exception as exc:
+    except requests.exceptions.Timeout:
+        log.warning("Heartbeat timed out.")
+    except requests.exceptions.ConnectionError as exc:
+        log.warning("Heartbeat connection error: %s", exc)
+    except requests.exceptions.HTTPError as exc:
+        log.warning("Heartbeat HTTP error: %s", exc)
+    except requests.exceptions.RequestException as exc:
         log.warning("Heartbeat failed: %s", exc)
 
 
 def send_events(api_url, headers, events):
     """Post collected events to the telemetry ingest endpoint."""
-    if not events:
+    if requests is None or not events:
         return
     try:
         resp = requests.post(f"{api_url}/telemetry/ingest", json=events, headers=headers, timeout=15)
@@ -152,7 +163,13 @@ def send_events(api_url, headers, events):
             data.get("processed", 0),
             data.get("threat_matches", 0),
         )
-    except Exception as exc:
+    except requests.exceptions.Timeout:
+        log.warning("Send timed out for %d events.", len(events))
+    except requests.exceptions.ConnectionError as exc:
+        log.warning("Connection error sending %d events: %s", len(events), exc)
+    except requests.exceptions.HTTPError as exc:
+        log.warning("HTTP error sending %d events: %s", len(events), exc)
+    except requests.exceptions.RequestException as exc:
         log.warning("Failed to send %d events: %s", len(events), exc)
 
 
@@ -160,6 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description="SOC Distributed Agent")
     parser.add_argument("--api-url", default=os.getenv("SOC_API_URL", "http://localhost:8000"), help="Command Center API URL")
     parser.add_argument("--api-key", default=os.getenv("SOC_API_KEY", ""), help="API key for authentication")
+    parser.add_argument("--tenant-id", default=os.getenv("SOC_TENANT_ID", ""), help="Tenant ID for authentication")
     parser.add_argument("--interval", type=int, default=int(os.getenv("SOC_AGENT_INTERVAL", "15")), help="Poll interval in seconds")
     args = parser.parse_args()
 
@@ -171,11 +189,14 @@ def main():
     if not args.api_key.strip():
         log.error("API key is required. Provide --api-key or set SOC_API_KEY.")
         return
+    if not args.tenant_id.strip():
+        log.error("Tenant ID is required. Provide --tenant-id or set SOC_TENANT_ID.")
+        return
 
     headers = {
         "Content-Type": "application/json",
         "X-API-Key": args.api_key,
-        "X-Tenant-Id": os.getenv("SOC_TENANT_ID", "default"),
+        "X-Tenant-Id": args.tenant_id,
     }
 
     log.info("SOC Agent %s starting on %s — polling every %ds", AGENT_ID, HOSTNAME, args.interval)
@@ -204,7 +225,7 @@ def main():
         except KeyboardInterrupt:
             log.info("Agent shutting down.")
             break
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             log.error("Agent loop error: %s", exc)
             time.sleep(args.interval)
 

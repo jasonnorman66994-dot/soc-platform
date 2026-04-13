@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Header, Request
+from contextlib import asynccontextmanager
+# pylint: disable=broad-exception-caught,global-statement,raise-missing-from
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, ConfigDict, constr, model_validator
+from pydantic import BaseModel, Field, ConfigDict, StringConstraints, model_validator
 import json
 import os
 import hmac
@@ -13,7 +15,7 @@ import csv
 import math
 import re
 from pathlib import Path
-from typing import Literal, Any
+from typing import Literal, Any, Annotated, cast
 from uuid import uuid4
 
 import psycopg
@@ -25,12 +27,12 @@ from passlib.context import CryptContext
 
 try:
     import stripe
-except Exception:
+except ImportError:
     stripe = None
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     BackgroundScheduler = None  # type: ignore[assignment,misc]
 
 from auth.jwt import create_access_token, create_refresh_token, verify_token
@@ -43,7 +45,6 @@ from soar.playbooks import execute_playbook_for_incident, get_execution_history
 from incidents.service import (
     add_timeline_event,
     add_analyst_note,
-    close_incident,
     get_response_summary,
     log_response_action,
 )
@@ -139,7 +140,9 @@ def _severity_rank(level: str | None) -> int:
 
 
 def _max_severity(current: str | None, incoming: str | None) -> str:
-    return current if _severity_rank(current) >= _severity_rank(incoming) else (incoming or current or "low")
+    if _severity_rank(current) >= _severity_rank(incoming):
+        return current or "low"
+    return incoming or current or "low"
 
 
 def _calculate_risk_score(critical_alerts: int, high_alerts: int, total_alerts: int) -> int:
@@ -151,14 +154,17 @@ def _calculate_risk_score(critical_alerts: int, high_alerts: int, total_alerts: 
 def _normalize_intelligence_events(rows: list[dict]) -> list[dict]:
     normalized = []
     for row in rows:
-        raw = row.get("raw")
-        if isinstance(raw, str):
+        raw_obj = row.get("raw")
+        if isinstance(raw_obj, str):
             try:
-                raw = json.loads(raw)
-            except Exception:  # noqa: BLE001
-                raw = {}
-        raw = raw or {}
-        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+                raw_obj = json.loads(raw_obj)
+            except json.JSONDecodeError:
+                raw_obj = {}
+        raw: dict[str, Any] = raw_obj if isinstance(raw_obj, dict) else {}
+        payload_raw: dict[str, Any] = {}
+        payload_candidate = raw.get("raw")
+        if isinstance(payload_candidate, dict):
+            payload_raw = payload_candidate
         user = row.get("user_id") or "unknown-user"
         ip = raw.get("ip") or payload_raw.get("ip")
         geo = raw.get("from") or raw.get("location") or payload_raw.get("from") or payload_raw.get("location")
@@ -358,6 +364,16 @@ def _should_auto_respond(
     threshold = active_policy.get("default_risk_threshold", AUTO_RESPONSE_RISK_THRESHOLD)
     if isinstance(playbook_policy, dict) and isinstance(playbook_policy.get("min_risk"), int):
         threshold = playbook_policy.get("min_risk")
+    if isinstance(threshold, int):
+        threshold_int = threshold
+    elif isinstance(threshold, (float, str)):
+        try:
+            threshold_int = int(threshold)
+        except (TypeError, ValueError):
+            threshold_int = AUTO_RESPONSE_RISK_THRESHOLD
+    else:
+        threshold_int = AUTO_RESPONSE_RISK_THRESHOLD
+    threshold_int = max(0, min(threshold_int, 100))
 
     # ML anomaly gate: if ml_risk_threshold is set and ML score is below it, halt execution
     ml_risk_threshold = None
@@ -384,7 +400,7 @@ def _should_auto_respond(
                 )
             return "pending_review"
 
-    if risk_score >= max(0, min(int(threshold), 100)):
+    if risk_score >= threshold_int:
         return True
     return any(item in {"ACCOUNT_TAKEOVER", "IMPOSSIBLE_TRAVEL_CHAIN"} for item in patterns)
 
@@ -566,14 +582,17 @@ def build_executive_attack_story_report(tenant_id: str, window_minutes: int = 18
     scenario_counts: dict[str, int] = {}
 
     for row in rows:
-        raw = row.get("raw")
-        if isinstance(raw, str):
+        raw_obj = row.get("raw")
+        if isinstance(raw_obj, str):
             try:
-                raw = json.loads(raw)
-            except Exception:  # noqa: BLE001
-                raw = {}
-        raw = raw or {}
-        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+                raw_obj = json.loads(raw_obj)
+            except json.JSONDecodeError:
+                raw_obj = {}
+        raw: dict[str, Any] = raw_obj if isinstance(raw_obj, dict) else {}
+        payload_raw: dict[str, Any] = {}
+        payload_candidate = raw.get("raw")
+        if isinstance(payload_candidate, dict):
+            payload_raw = payload_candidate
         event_type = row["type"]
         user = row.get("user_id") or "unknown-user"
         scenario = raw.get("scenario") or payload_raw.get("scenario")
@@ -723,8 +742,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class LoginBody(BaseModel):
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    password: constr(min_length=8, max_length=128)
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=255)]
+    password: Annotated[str, StringConstraints(min_length=8, max_length=128)]
 
 
 class RefreshBody(BaseModel):
@@ -734,15 +753,15 @@ class RefreshBody(BaseModel):
 class SignupBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    company: constr(strip_whitespace=True, min_length=2, max_length=120)
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    password: constr(min_length=8, max_length=128)
+    company: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=255)]
+    password: Annotated[str, StringConstraints(min_length=8, max_length=128)]
     plan: str = "free"
 
 
 class CreateUserBody(BaseModel):
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    password: constr(min_length=8, max_length=128)
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=255)]
+    password: Annotated[str, StringConstraints(min_length=8, max_length=128)]
     role: str = Field(pattern="^(admin|analyst|viewer)$")
 
 
@@ -802,9 +821,9 @@ class LiveSimulationBody(BaseModel):
 class WaitlistLeadBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    company: constr(strip_whitespace=True, min_length=2, max_length=120)
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    role: constr(strip_whitespace=True, min_length=2, max_length=120) = "security_lead"
+    company: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=255)]
+    role: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)] = "security_lead"
     source: str = "landing"
 
 
@@ -816,8 +835,8 @@ class TenantSubscriptionBody(BaseModel):
 class AnalyticsEventBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    event_name: constr(strip_whitespace=True, min_length=2, max_length=80)
-    page: constr(strip_whitespace=True, min_length=1, max_length=200) = "/"
+    event_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
+    page: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] = "/"
     meta: dict | None = None
 
 
@@ -972,7 +991,7 @@ def now_utc() -> datetime:
 # Threat Intelligence Service (The Oracle)
 # ---------------------------------------------------------------------------
 _THREAT_INTEL_FEED: dict[str, dict] = {}  # ip -> {source, category, risk, last_seen}
-_THREAT_INTEL_LAST_POLL: float = 0.0
+_THREAT_INTEL_STATE = {"last_poll": 0.0}
 _THREAT_INTEL_POLL_INTERVAL = 300  # seconds
 
 # Mock global blocklist (simulates AlienVault OTX / abuse.ch feeds)
@@ -987,15 +1006,14 @@ _MOCK_THREAT_FEED = {
 
 def poll_threat_intel_feed() -> dict[str, dict]:
     """Poll global threat intel feed. Returns current feed state."""
-    global _THREAT_INTEL_LAST_POLL
     import time as _time
     now = _time.time()
-    if now - _THREAT_INTEL_LAST_POLL < _THREAT_INTEL_POLL_INTERVAL and _THREAT_INTEL_FEED:
+    if now - _THREAT_INTEL_STATE["last_poll"] < _THREAT_INTEL_POLL_INTERVAL and _THREAT_INTEL_FEED:
         return _THREAT_INTEL_FEED
     # In production: fetch from AlienVault OTX API, abuse.ch, etc.
     _THREAT_INTEL_FEED.clear()
     _THREAT_INTEL_FEED.update(_MOCK_THREAT_FEED)
-    _THREAT_INTEL_LAST_POLL = now
+    _THREAT_INTEL_STATE["last_poll"] = now
     return _THREAT_INTEL_FEED
 
 
@@ -1012,7 +1030,7 @@ def _delete_shared_threat(ip: str, source_tenant: str, source: str = "Ghost Dril
                     (ip, source_tenant, source),
                 )
             conn.commit()
-    except Exception:
+    except psycopg.Error:
         pass
 
 
@@ -1146,15 +1164,14 @@ def _detect_email_spam_drive(tenant_id: str) -> dict:
         })
 
     # Determine the actual current hour bucket for accurate detection
-    from datetime import datetime as _dt, timezone as _tz
-    current_hour = _dt.now(_tz.utc).replace(minute=0, second=0, microsecond=0)
+    current_hour = now_utc().replace(minute=0, second=0, microsecond=0)
 
     flagged: list[dict] = []
     for tld, buckets in tld_buckets.items():
         if len(buckets) < 2:
             continue
         # Only treat the actual current hour as "current"; use all others as baseline
-        current_bucket = next((b for b in buckets if b["hour"] and b["hour"].replace(tzinfo=_tz.utc) == current_hour), None)
+        current_bucket = next((b for b in buckets if b["hour"] and b["hour"].replace(tzinfo=timezone.utc) == current_hour), None)
         if current_bucket is None:
             continue  # No data for the current hour — skip this TLD
         baseline = [b["avg_link_density"] for b in buckets if b is not current_bucket]
@@ -1321,7 +1338,7 @@ def _telemetry_frequency_zscore(tenant_id: str, user_id: str, event_type: str, n
         ts_raw = item.get("timestamp")
         try:
             ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-        except Exception:
+        except ValueError:
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
@@ -1490,7 +1507,7 @@ def _default_soar_policy() -> dict:
 
 def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
     default = _default_soar_policy()
-    candidate = {}
+    candidate: dict[str, Any] = {}
     if isinstance(raw_policy, dict):
         candidate = raw_policy
     elif isinstance(raw_policy, str):
@@ -1514,18 +1531,26 @@ def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
         ml_risk_threshold = default["ml_risk_threshold"]
     ml_risk_threshold = max(0.0, min(float(ml_risk_threshold), 100.0))
 
-    playbooks_in = candidate.get("playbooks") if isinstance(candidate.get("playbooks"), dict) else {}
+    playbooks_in: dict[str, Any] = {}
+    raw_playbooks = candidate.get("playbooks")
+    if isinstance(raw_playbooks, dict):
+        playbooks_in = raw_playbooks
     playbooks = {}
     for name, base in default["playbooks"].items():
-        requested = playbooks_in.get(name) if isinstance(playbooks_in.get(name), dict) else {}
+        requested: dict[str, Any] = {}
+        requested_candidate = playbooks_in.get(name)
+        if isinstance(requested_candidate, dict):
+            requested = requested_candidate
         enabled = requested.get("enabled") if isinstance(requested.get("enabled"), bool) else base["enabled"]
         min_risk = requested.get("min_risk") if isinstance(requested.get("min_risk"), int) else base["min_risk"]
         pb_ml_thresh = requested.get("ml_risk_threshold") if isinstance(requested.get("ml_risk_threshold"), (int, float)) else base.get("ml_risk_threshold", ml_risk_threshold)
+        min_risk_int = min_risk if isinstance(min_risk, int) else base["min_risk"]
+        pb_ml_thresh_float = float(pb_ml_thresh) if isinstance(pb_ml_thresh, (int, float)) else float(ml_risk_threshold)
         pb_deception = requested.get("deception_enabled") if isinstance(requested.get("deception_enabled"), bool) else base.get("deception_enabled", False)
         playbooks[name] = {
             "enabled": enabled,
-            "min_risk": max(0, min(min_risk, 100)),
-            "ml_risk_threshold": max(0.0, min(float(pb_ml_thresh), 100.0)),
+            "min_risk": max(0, min(min_risk_int, 100)),
+            "ml_risk_threshold": max(0.0, min(pb_ml_thresh_float, 100.0)),
             "deception_enabled": pb_deception,
         }
 
@@ -1728,14 +1753,14 @@ def evaluate_security_posture() -> list[str]:
 
 
 def enforce_security_policy():
-    global SECURITY_WARNINGS
-    SECURITY_WARNINGS = evaluate_security_posture()
+    SECURITY_WARNINGS[:] = evaluate_security_posture()
     if os.getenv("STRICT_SECURITY_MODE", "false").lower() == "true" and SECURITY_WARNINGS:
         raise RuntimeError(f"Strict security mode failed: {', '.join(SECURITY_WARNINGS)}")
 
 
 def get_conn():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    # Keep dict-shaped rows at runtime and avoid false-positive tuple-row typing cascades.
+    return cast(Any, psycopg.connect(DATABASE_URL, row_factory=cast(Any, dict_row)))
 
 
 def init_db():
@@ -2028,7 +2053,7 @@ def verify_stripe_signature(payload: bytes, signature_header: str | None):
             stripe.Webhook.construct_event(payload, signature_header, secret, tolerance=tolerance)
             return
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}")
+            raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}") from exc
 
     if not signature_header:
         raise HTTPException(status_code=400, detail="Missing Stripe-Signature")
@@ -2041,8 +2066,8 @@ def verify_stripe_signature(payload: bytes, signature_header: str | None):
 
     try:
         ts = int(timestamp)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid Stripe timestamp")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Stripe timestamp") from exc
 
     now_ts = int(now_utc().timestamp())
     if abs(now_ts - ts) > tolerance:
@@ -2130,8 +2155,8 @@ def get_current_user(
     token = authorization.replace("Bearer ", "")
     try:
         claims = verify_token(token, token_type="access")
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -2151,8 +2176,8 @@ def require_action(action: str):
     def dep(user=Depends(get_current_user)):
         try:
             authorize(user, action)
-        except PermissionError:
-            raise HTTPException(status_code=403, detail="Forbidden")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail="Forbidden") from exc
         return user
 
     return dep
@@ -2195,7 +2220,8 @@ def load_rules() -> list[dict]:
         if not fpath.is_file() or fpath.suffix.lower() not in {".yaml", ".yml", ".json"}:
             continue
         raw = fpath.read_text(encoding="utf-8")
-        item = yaml.safe_load(raw) if fpath.suffix.lower() in {".yaml", ".yml"} else json.loads(raw)
+        loaded = yaml.safe_load(raw) if fpath.suffix.lower() in {".yaml", ".yml"} else json.loads(raw)
+        item = loaded if isinstance(loaded, dict) else {}
         item["pack"] = str(fpath.parent.relative_to(RULES_DIR)).replace("\\", "/")
         item["id"] = item.get("id") or fpath.stem
         rules.append(item)
@@ -2230,7 +2256,7 @@ async def security_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-_scheduler: "BackgroundScheduler | None" = None
+_scheduler_state: dict[str, Any] = {"scheduler": None}
 
 
 def execute_due_report_schedules() -> dict:
@@ -2257,7 +2283,7 @@ def execute_due_report_schedules() -> dict:
                     run_report_schedule_export(cur, schedule_id)
                     conn.commit()
             executed_ids.append(schedule_id)
-        except Exception as exc:  # noqa: BLE001
+        except (psycopg.Error, HTTPException, ValueError, TypeError, RuntimeError) as exc:
             failures.append({"schedule_id": schedule_id, "error": str(exc)})
 
     return {
@@ -2278,26 +2304,30 @@ def _fire_due_schedules() -> None:
                 f"[scheduler] due run summary found={summary['found']} executed={summary['executed_count']} failed={summary['failed_count']}",
                 flush=True,
             )
-    except Exception as exc:  # noqa: BLE001
+    except (psycopg.Error, HTTPException, ValueError, TypeError, RuntimeError) as exc:
         print(f"[scheduler] error running due schedules: {exc}", flush=True)
 
 
-@app.on_event("startup")
-def startup_event():
-    global _scheduler
+@asynccontextmanager
+async def _app_lifespan(_: FastAPI):
     init_db()
     cleanup_webhook_replays()
     enforce_security_policy()
     if BackgroundScheduler is not None:
-        _scheduler = BackgroundScheduler(job_defaults={"misfire_grace_time": 30})
-        _scheduler.add_job(_fire_due_schedules, "interval", minutes=1, id="fire_due_schedules")
-        _scheduler.start()
+        scheduler = BackgroundScheduler(job_defaults={"misfire_grace_time": 30})
+        scheduler.add_job(_fire_due_schedules, "interval", minutes=1, id="fire_due_schedules")
+        scheduler.start()
+        _scheduler_state["scheduler"] = scheduler
+
+    try:
+        yield
+    finally:
+        scheduler = _scheduler_state.get("scheduler")
+        if scheduler is not None and scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
-@app.on_event("shutdown")
-def shutdown_event():
-    if _scheduler is not None and _scheduler.running:
-        _scheduler.shutdown(wait=False)
+app.router.lifespan_context = _app_lifespan
 
 
 @app.get("/health")
@@ -2356,7 +2386,7 @@ def verify_admin_session_token(token: str, token_type: str = "admin_access") -> 
         return None
     if row["expires_at"] < now_utc():
         return None
-    return payload
+    return dict(payload)
 
 
 def create_admin_session_pair() -> dict:
@@ -2418,7 +2448,9 @@ def revoke_admin(body: AdminSessionRevokeBody):
     claims = verify_admin_session_token(body.refresh_token, token_type="admin_refresh")
     if not claims:
         raise HTTPException(status_code=401, detail="Invalid admin refresh token")
-    revoke_admin_session(claims.get("jti"))
+    old_jti = claims.get("jti")
+    if old_jti:
+        revoke_admin_session(old_jti)
     return {"revoked": True}
 
 
@@ -2780,7 +2812,7 @@ async def _live_simulation_worker(tenant_id: str) -> None:
             user_id="demo.user",
             source_country="UK",
             destination_country="US",
-            scenario=scenario,
+            scenario=cast(Any, scenario),
             iterations=1,
             include_noise=bool(state.get("include_noise", True)),
             dry_run=False,
@@ -2792,7 +2824,7 @@ async def _live_simulation_worker(tenant_id: str) -> None:
             state["last_scenario"] = scenario
             state["emitted_count"] = int(state.get("emitted_count", 0)) + 1
             LIVE_SIMULATION_STATE[tenant_id] = state
-        except Exception as exc:  # noqa: BLE001
+        except (psycopg.Error, HTTPException, ValueError, TypeError, RuntimeError) as exc:
             state["last_error"] = str(exc)
             LIVE_SIMULATION_STATE[tenant_id] = state
 
@@ -2911,8 +2943,8 @@ def login(body: LoginBody, tenant_id: str = Depends(get_tenant)):
 def refresh(body: RefreshBody, tenant_id: str = Depends(get_tenant)):
     try:
         claims = verify_token(body.refresh_token, token_type="refresh")
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid refresh token") from exc
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -2985,8 +3017,8 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
 
     try:
         event = json.loads(payload.decode("utf-8"))
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
 
     event_type = event.get("type", "unknown")
     stripe_event_id = event.get("id")
@@ -3134,7 +3166,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                     if isinstance(existing_story, str):
                         try:
                             existing_story = json.loads(existing_story)
-                        except Exception:  # noqa: BLE001
+                        except json.JSONDecodeError:
                             existing_story = {}
                     existing_story = existing_story if isinstance(existing_story, dict) else {}
 
@@ -3337,7 +3369,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                 if claimed_for_response:
                     incident_row["status"] = "responding"
 
-            if claimed_for_response:
+            if claimed_for_response and incident_row is not None:
                 incident_payload, event_payload = _build_playbook_inputs(
                     incident_row,
                     payload,
@@ -3468,14 +3500,17 @@ def get_events(
 
     normalized = []
     for row in rows:
-        raw = row.get("raw")
-        if isinstance(raw, str):
+        raw_obj = row.get("raw")
+        if isinstance(raw_obj, str):
             try:
-                raw = json.loads(raw)
-            except Exception:  # noqa: BLE001
-                raw = {}
-        raw = raw or {}
-        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+                raw_obj = json.loads(raw_obj)
+            except json.JSONDecodeError:
+                raw_obj = {}
+        raw: dict[str, Any] = raw_obj if isinstance(raw_obj, dict) else {}
+        payload_raw: dict[str, Any] = {}
+        payload_candidate = raw.get("raw")
+        if isinstance(payload_candidate, dict):
+            payload_raw = payload_candidate
         normalized.append(
             {
                 "id": row["id"],
@@ -3859,7 +3894,7 @@ def execute_specific_playbook(
 @app.get("/soar/executions/{incident_id}")
 def get_soar_execution_history(
     incident_id: int,
-    tenant_id: str = Depends(get_tenant),
+    _tenant_id: str = Depends(get_tenant),
     _user=Depends(require_action("view_incidents")),
 ):
     """Get SOAR automation execution history for incident."""
@@ -4563,7 +4598,7 @@ def get_recent_telemetry(
 
 @app.get("/threat-intel/feed")
 def get_threat_intel_feed(
-    tenant_id: str = Depends(get_tenant),
+    _tenant_id: str = Depends(get_tenant),
     _user=Depends(require_action("view_incidents")),
 ):
     """Get current global threat intelligence feed, including shared sovereign intelligence."""
@@ -4621,7 +4656,7 @@ def get_threat_intel_feed(
 @app.post("/threat-intel/check")
 def check_threat_intel_endpoint(
     ip: str,
-    tenant_id: str = Depends(get_tenant),
+    _tenant_id: str = Depends(get_tenant),
     _user=Depends(require_action("view_incidents")),
 ):
     """Check if a specific IP is in the threat intelligence feed."""
@@ -4820,7 +4855,7 @@ def update_incident_status_endpoint(
         incident_id,
         action="status_changed",
         description=f"Status changed to {new_status}: {reason}",
-        actor=user.get("id") if user else None,
+        actor=str(user.get("id")) if user and user.get("id") is not None else "system",
         details={"previous_status": "unknown", "new_status": new_status},
     )
     
@@ -4848,7 +4883,7 @@ def add_incident_note(
     note_entry = add_analyst_note(
         incident_id=incident_id,
         note=note,
-        analyst_id=user.get("id") if user else None,
+        analyst_id=str(user.get("id")) if user and user.get("id") is not None else "system",
         tags=tags,
     )
 
@@ -5063,7 +5098,7 @@ def get_incident_timeline(
     if isinstance(story, str):
         try:
             story = json.loads(story)
-        except Exception:
+        except json.JSONDecodeError:
             story = {}
     users = (story.get("users") if isinstance(story, dict) else None) or []
     baseline_user = users[0] if users else incident.get("entity")
@@ -5102,7 +5137,7 @@ def get_incident_reasoning(
     if isinstance(story, str):
         try:
             story = json.loads(story)
-        except Exception:
+        except json.JSONDecodeError:
             story = {}
     users = (story.get("users") if isinstance(story, dict) else None) or []
     reasoning_user = users[0] if users else incident.get("entity")
@@ -6192,7 +6227,7 @@ async def broadcast(tenant_id: str, alert: dict):
             continue
         try:
             await c["ws"].send_json(alert)
-        except Exception:
+        except (WebSocketDisconnect, RuntimeError, ConnectionError):
             stale.append(c)
     for c in stale:
         if c in clients:
