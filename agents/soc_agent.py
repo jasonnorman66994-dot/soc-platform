@@ -41,12 +41,44 @@ logging.basicConfig(
 )
 log = logging.getLogger("soc-agent")
 
+def _get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        log.warning(
+            "Invalid integer for %s: %r. Falling back to default %d.",
+            name,
+            value,
+            default,
+        )
+        return default
+
+
+def _get_float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        log.warning(
+            "Invalid float for %s: %r. Falling back to default %.1f.",
+            name,
+            value,
+            default,
+        )
+        return default
+
+
 AGENT_ID = os.getenv("SOC_AGENT_ID", f"agent-{uuid.uuid4().hex[:8]}")
 HOSTNAME = platform.node()
-DEFAULT_BATCH_SIZE = int(os.getenv("SOC_AGENT_BATCH_SIZE", "100"))
-DEFAULT_MAX_RETRIES = int(os.getenv("SOC_AGENT_MAX_RETRIES", "2"))
-DEFAULT_RETRY_BASE_DELAY = float(os.getenv("SOC_AGENT_RETRY_BASE_DELAY", "1.0"))
-DEFAULT_RETRY_MAX_DELAY = float(os.getenv("SOC_AGENT_RETRY_MAX_DELAY", "8.0"))
+DEFAULT_BATCH_SIZE = _get_int_env("SOC_AGENT_BATCH_SIZE", 100)
+DEFAULT_MAX_RETRIES = _get_int_env("SOC_AGENT_MAX_RETRIES", 2)
+DEFAULT_RETRY_BASE_DELAY = _get_float_env("SOC_AGENT_RETRY_BASE_DELAY", 1.0)
+DEFAULT_RETRY_MAX_DELAY = _get_float_env("SOC_AGENT_RETRY_MAX_DELAY", 8.0)
 
 TelemetryEvent = dict[str, Any]
 RequestHeaders = dict[str, str]

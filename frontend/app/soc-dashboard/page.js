@@ -14,6 +14,10 @@ function resolveSocApiUrl() {
     return process.env.NEXT_PUBLIC_SOC_CORE_API_URL;
   }
   if (typeof window !== "undefined") {
+    const { protocol, hostname, port } = window.location;
+    if (port === "3000") {
+      return `${protocol}//${hostname}/api`;
+    }
     return `${window.location.origin}/api`;
   }
   return "http://localhost:8000";

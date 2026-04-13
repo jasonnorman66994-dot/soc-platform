@@ -86,7 +86,13 @@ Then check nightly resilience status and artifacts:
 If distributed telemetry volume spikes or ingest retries become noisy after release, roll agent tuning back to defaults:
 
 1. Set these environment values where agents run:
-	`SOC_AGENT_BATCH_SIZE=100`, `SOC_AGENT_MAX_RETRIES=2`, `SOC_AGENT_RETRY_BASE_DELAY=1.0`, `SOC_AGENT_RETRY_MAX_DELAY=8.0`.
+
+   ```text
+   SOC_AGENT_BATCH_SIZE=100
+   SOC_AGENT_MAX_RETRIES=2
+   SOC_AGENT_RETRY_BASE_DELAY=1.0
+   SOC_AGENT_RETRY_MAX_DELAY=8.0
+   ```
 
 1. Restart agent processes.
 
