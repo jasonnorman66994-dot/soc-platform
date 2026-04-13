@@ -12,13 +12,14 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
+  issues: write
 
 jobs:
   label-policy:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate required labels
+      - name: Auto-apply and validate required labels
         uses: actions/github-script@v7
         with:
           script: |
@@ -27,7 +28,7 @@ jobs:
             const pull_number = context.payload.pull_request.number;
 
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
-            const labels = (pr.labels || []).map((l) => l.name);
+            let labels = (pr.labels || []).map((l) => l.name);
 
             const areaLabels = [
               "security", "hardening", "ci", "github-actions", "backend", "api",
@@ -39,11 +40,65 @@ jobs:
             const hasArea = labels.some((l) => areaLabels.includes(l));
             const hasVersion = labels.some((l) => versionLabels.includes(l));
 
-            const missing = [];
+            const toApply = [];
+            const text = `${pr.title} ${pr.head.ref}`.toLowerCase();
+
             if (!hasArea) {
+              let inferred = null;
+              if (/secur/.test(text))                          inferred = "security";
+              else if (/harden/.test(text))                    inferred = "hardening";
+              else if (/\bci\b|workflow|action/.test(text))    inferred = "ci";
+              else if (/frontend|ui\b/.test(text))             inferred = "frontend";
+              else if (/backend|api/.test(text))               inferred = "backend";
+              else if (/infra|ops|deploy|docker/.test(text))   inferred = "infra";
+              else if (/docs?|readme|changelog/.test(text))    inferred = "docs";
+              if (inferred) toApply.push(inferred);
+            }
+
+            if (!hasVersion) {
+              let inferred = null;
+              if (/\bbreak|major/.test(text))                  inferred = "major";
+              else if (/\bfeat|minor|add|new/.test(text))      inferred = "minor";
+              else if (/\bfix|bug/.test(text))                 inferred = "fix";
+              else if (/\bchore|refactor|clean|update/.test(text)) inferred = "chore";
+              else                                              inferred = "patch";
+              toApply.push(inferred);
+            }
+
+            if (toApply.length > 0) {
+              // Ensure each label exists in the repo before applying it.
+              const { data: repoLabels } = await github.rest.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
+              const existing = new Set(repoLabels.map((l) => l.name));
+              const labelColors = {
+                security: "e11d48", hardening: "f97316", "github-actions": "6366f1",
+                ci: "8b5cf6", backend: "75be55", api: "3b82f6",
+                frontend: "06b6d4", ui: "06b6d4", infra: "f59e0b",
+                ops: "d97706", docs: "94a3b8",
+                major: "b91c1c", minor: "0284c7", patch: "fbca04",
+                fix: "dc2626", chore: "6b7280"
+              };
+              for (const name of toApply) {
+                if (!existing.has(name)) {
+                  await github.rest.issues.createLabel({
+                    owner, repo, name,
+                    color: labelColors[name] || "ededed",
+                    description: `Auto-created by PR label policy`
+                  });
+                }
+              }
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pull_number, labels: toApply });
+              labels = [...labels, ...toApply];
+              core.info(`Auto-applied labels: ${toApply.join(", ")}`);
+            }
+
+            const finalHasArea = labels.some((l) => areaLabels.includes(l));
+            const finalHasVersion = labels.some((l) => versionLabels.includes(l));
+
+            const missing = [];
+            if (!finalHasArea) {
               missing.push(`one area label (${areaLabels.join(", ")})`);
             }
-            if (!hasVersion) {
+            if (!finalHasVersion) {
               missing.push(`one version label (${versionLabels.join(", ")})`);
             }
 
