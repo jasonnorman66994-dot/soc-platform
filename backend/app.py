@@ -2341,6 +2341,34 @@ def health():
     }
 
 
+@app.get("/ready")
+def ready():
+    """Readiness probe: verifies critical dependencies are reachable."""
+    checks = {"database": "ok", "redis": "ok"}
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+
+    try:
+        rdb.ping()
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    if checks["database"] != "ok" or checks["redis"] != "ok":
+        raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
+
+    return {
+        "status": "ready",
+        "service": "api-gateway",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }
+
+
 def create_admin_access_token(jti: str) -> str:
     secret = os.getenv("ADMIN_SESSION_SECRET", os.getenv("JWT_SECRET", "change-me-in-production"))
     payload = {
