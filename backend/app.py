@@ -2015,9 +2015,10 @@ def seed_demo_data():
 
 
 def get_tenant(tenant_id: str | None = Header(default=None, alias="X-Tenant-ID")) -> str:
-    if not tenant_id:
+    normalized_tenant_id = (tenant_id or "").strip()
+    if not normalized_tenant_id:
         raise HTTPException(status_code=400, detail="Missing X-Tenant-ID header")
-    return tenant_id
+    return normalized_tenant_id
 
 
 def fetch_tenant(tenant_id: str) -> dict:
