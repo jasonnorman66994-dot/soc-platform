@@ -9,8 +9,30 @@ import AttackGraph from "../../components/AttackGraph";
 import Timeline from "../../components/Timeline";
 import { connectSocSocket } from "../../lib/socket";
 
-const SOC_API = process.env.NEXT_PUBLIC_SOC_CORE_API_URL || "http://localhost:8000";
-const SOC_WS = process.env.NEXT_PUBLIC_SOC_CORE_WS_URL || "ws://localhost:8000/ws/alerts";
+function resolveSocApiUrl() {
+  if (process.env.NEXT_PUBLIC_SOC_CORE_API_URL) {
+    return process.env.NEXT_PUBLIC_SOC_CORE_API_URL;
+  }
+  if (typeof window !== "undefined") {
+    const { protocol, hostname, port } = window.location;
+    if (port === "3000") {
+      return `${protocol}//${hostname}/api`;
+    }
+    return `${window.location.origin}/api`;
+  }
+  return "http://localhost:8000";
+}
+
+function resolveSocWsUrl() {
+  if (process.env.NEXT_PUBLIC_SOC_CORE_WS_URL) {
+    return process.env.NEXT_PUBLIC_SOC_CORE_WS_URL;
+  }
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${protocol}://${window.location.host}/ws/alerts`;
+  }
+  return "ws://localhost:8000/ws/alerts";
+}
 
 function buildGraphData(records) {
   const nodes = [];
@@ -72,11 +94,14 @@ export default function SocDashboardPage() {
   const graph_data = useMemo(() => buildGraphData(streamRecords), [streamRecords]);
 
   useEffect(() => {
+    const socApiUrl = resolveSocApiUrl();
+    const socWsUrl = resolveSocWsUrl();
+
     async function bootstrap() {
       const [events_res, alerts_res, incidents_res] = await Promise.all([
-        axios.get(`${SOC_API}/events?limit=40`),
-        axios.get(`${SOC_API}/alerts?limit=40`),
-        axios.get(`${SOC_API}/incidents?limit=20`),
+        axios.get(`${socApiUrl}/events?limit=40`),
+        axios.get(`${socApiUrl}/alerts?limit=40`),
+        axios.get(`${socApiUrl}/incidents?limit=20`),
       ]);
 
       const events_data = events_res.data;
@@ -91,7 +116,7 @@ export default function SocDashboardPage() {
     bootstrap();
 
     const disconnect = connectSocSocket({
-      url: SOC_WS,
+      url: socWsUrl,
       onStateChange: setSocketState,
       onMessage: (payload) => {
         setStreamRecords((current) => [payload, ...current].slice(0, 60));

@@ -179,6 +179,60 @@ EMAIL_RECIPIENTS=security-team@company.com,soc@company.com
 STRIPE_API_KEY=sk_live_...
 ```
 
+## Distributed Agent Deployment (Production)
+
+Use the endpoint collector at [agents/soc_agent.py](agents/soc_agent.py) to stream host telemetry to the platform.
+
+### Recommended Runtime Flags
+
+```bash
+cd agents
+python soc_agent.py \
+  --api-url https://your-soc.example.com/api \
+  --api-key YOUR_API_KEY \
+  --tenant-id YOUR_TENANT_ID \
+  --interval 15 \
+  --batch-size 250 \
+  --max-retries 4 \
+  --retry-base-delay 1.0 \
+  --retry-max-delay 16.0
+```
+
+### Recommended Production Values
+
+- `batch-size=250`: higher throughput with bounded request sizes.
+- `max-retries=4`: resilience against transient API/network failures.
+- `retry-base-delay=1.0`: fast first retry.
+- `retry-max-delay=16.0`: caps exponential retry backoff.
+
+### Environment Variable Equivalents
+
+```bash
+SOC_AGENT_BATCH_SIZE=250
+SOC_AGENT_MAX_RETRIES=4
+SOC_AGENT_RETRY_BASE_DELAY=1.0
+SOC_AGENT_RETRY_MAX_DELAY=16.0
+```
+
+Use the public API gateway URL in `--api-url` (for example `https://your-soc.example.com/api`) so ingest requests reach `/telemetry/ingest` through NGINX.
+
+### Rollback (Agent Tuning)
+
+If telemetry volume or retry pressure is too high after rollout, revert to conservative defaults and restart agent processes:
+
+```bash
+SOC_AGENT_BATCH_SIZE=100
+SOC_AGENT_MAX_RETRIES=2
+SOC_AGENT_RETRY_BASE_DELAY=1.0
+SOC_AGENT_RETRY_MAX_DELAY=8.0
+```
+
+Equivalent runtime flag rollback:
+
+```bash
+--batch-size 100 --max-retries 2 --retry-base-delay 1.0 --retry-max-delay 8.0
+```
+
 ## Monitoring & Observability
 
 ### Prometheus Scrape Config

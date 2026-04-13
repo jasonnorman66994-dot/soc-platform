@@ -723,6 +723,7 @@ def run_report_schedule_export(cur, schedule_id: int) -> dict:
 
 rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 clients: list[dict] = []
+public_alert_clients: list[WebSocket] = []
 RATE_LIMITS: dict[str, list[datetime]] = {}
 RULES_DIR = Path(__file__).parent / "rules"
 LIVE_SIMULATION_TASKS: dict[str, asyncio.Task] = {}
@@ -6215,9 +6216,25 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         for item in list(clients):
             if item["ws"] == ws:
                 clients.remove(item)
+
+
+@app.websocket("/ws/alerts")
+async def websocket_alert_stream(ws: WebSocket):
+    await ws.accept()
+    public_alert_clients.append(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if ws in public_alert_clients:
+            public_alert_clients.remove(ws)
 
 
 async def broadcast(tenant_id: str, alert: dict):
@@ -6232,6 +6249,16 @@ async def broadcast(tenant_id: str, alert: dict):
     for c in stale:
         if c in clients:
             clients.remove(c)
+
+    stale_public: list[WebSocket] = []
+    for ws in public_alert_clients:
+        try:
+            await ws.send_json(alert)
+        except (WebSocketDisconnect, RuntimeError, ConnectionError):
+            stale_public.append(ws)
+    for ws in stale_public:
+        if ws in public_alert_clients:
+            public_alert_clients.remove(ws)
 
 
 def _run_response(tenant_id: str, action: str, target: str, incident_id: int):
