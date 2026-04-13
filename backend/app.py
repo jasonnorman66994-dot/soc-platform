@@ -3,7 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 # pylint: disable=broad-exception-caught,global-statement,raise-missing-from
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ConfigDict, StringConstraints, model_validator
 import json
 import os
@@ -730,6 +730,9 @@ LIVE_SIMULATION_TASKS: dict[str, asyncio.Task] = {}
 LIVE_SIMULATION_STATE: dict[str, dict[str, Any]] = {}
 SOAR_POLICY_CACHE: dict[str, dict[str, Any]] = {}
 SOAR_POLICY_CACHE_TTL_SECONDS = 30
+READINESS_DB_CONNECT_TIMEOUT_SECONDS = 1
+READINESS_DB_STATEMENT_TIMEOUT_MS = 1000
+READINESS_REDIS_TIMEOUT_SECONDS = 1
 
 ROLE_ORDER = {"viewer": 1, "analyst": 2, "admin": 3, "owner": 4}
 VALID_PLANS = {"free", "pro", "enterprise"}
@@ -2242,7 +2245,7 @@ async def security_middleware(request: Request, call_next):
     if enforce_https and not allow_insecure and proto != "https":
         raise HTTPException(status_code=400, detail="HTTPS required")
 
-    if request.url.path.startswith("/health"):
+    if request.url.path.startswith("/health") or request.url.path == "/ready":
         return await call_next(request)
 
     max_requests = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
@@ -2341,32 +2344,60 @@ def health():
     }
 
 
+def _check_database_readiness() -> None:
+    """Run a fast DB readiness check with strict timeouts."""
+    with psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=READINESS_DB_CONNECT_TIMEOUT_SECONDS,
+        options=f"-c statement_timeout={READINESS_DB_STATEMENT_TIMEOUT_MS}",
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+
+
+def _check_redis_readiness() -> None:
+    """Run a fast Redis readiness check with strict socket timeouts."""
+    client = redis.Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=READINESS_REDIS_TIMEOUT_SECONDS,
+        socket_timeout=READINESS_REDIS_TIMEOUT_SECONDS,
+    )
+    try:
+        client.ping()
+    finally:
+        client.close()
+
+
+@app.get("/health/ready")
 @app.get("/ready")
 def ready():
     """Readiness probe: verifies critical dependencies are reachable."""
     checks = {"database": "ok", "redis": "ok"}
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
+        _check_database_readiness()
     except Exception as exc:
-        checks["database"] = f"error: {exc}"
+        checks["database"] = "unavailable"
+        print(f"[ready] database check failed: {exc}", flush=True)
 
     try:
-        rdb.ping()
+        _check_redis_readiness()
     except Exception as exc:
-        checks["redis"] = f"error: {exc}"
+        checks["redis"] = "unavailable"
+        print(f"[ready] redis check failed: {exc}", flush=True)
 
-    if checks["database"] != "ok" or checks["redis"] != "ok":
-        raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
-
-    return {
-        "status": "ready",
+    payload = {
+        "status": "ready" if checks["database"] == "ok" and checks["redis"] == "ok" else "not_ready",
         "service": "api-gateway",
         "ts": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
     }
+
+    if payload["status"] != "ready":
+        return JSONResponse(status_code=503, content=payload)
+
+    return payload
 
 
 def create_admin_access_token(jti: str) -> str:
