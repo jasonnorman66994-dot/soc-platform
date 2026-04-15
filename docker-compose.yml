@@ -29,10 +29,18 @@ services:
       start_period: 20s
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        INTERNAL_API_ORIGIN: http://backend:8000
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: http://backend:8000
+      INTERNAL_API_ORIGIN: http://backend:8000
+      NEXT_PUBLIC_WS_URL: ws://127.0.0.1:8000
+      NEXT_PUBLIC_SOC_CORE_WS_URL: ws://127.0.0.1:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3000:3000"
     depends_on:
@@ -75,6 +83,8 @@ services:
   nginx:
     build: ./nginx
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "80:80"
     depends_on:
