@@ -7,20 +7,20 @@ import Timeline from "../../components/Timeline";
 import { replayTimeline } from "../../lib/timelineReplay";
 
 function resolveApiUrl() {
-  if (process.env.NEXT_PUBLIC_API_URL) {
+  if(process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL;
   }
-  if (typeof window !== "undefined") {
+  if(typeof window !== "undefined") {
     return `${window.location.origin}/api`;
   }
   return "http://localhost/api";
 }
 
 function resolveWsUrl() {
-  if (process.env.NEXT_PUBLIC_WS_URL) {
+  if(process.env.NEXT_PUBLIC_WS_URL) {
     return process.env.NEXT_PUBLIC_WS_URL;
   }
-  if (typeof window !== "undefined") {
+  if(typeof window !== "undefined") {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     return `${protocol}://${window.location.host}/ws`;
   }
@@ -60,7 +60,7 @@ function deriveVoiceIntent(transcript) {
 
   for (const { patterns, intent } of MULTI_INTENT_MAP) {
     for (const pattern of patterns) {
-      if (pattern.test(lower)) {
+      if(pattern.test(lower)) {
         return intent || lower.replace(/\s+/g, "_");
       }
     }
@@ -167,7 +167,7 @@ export default function CommandCenterPage() {
   const sovereign_pulse = useMemo(() => {
     const baseline = incidentTimeline?.behavioral_baseline;
     const points = baseline?.points || [];
-    if (!points.length) return null;
+    if(!points.length) return null;
 
     const width = 320;
     const height = 72;
@@ -193,14 +193,14 @@ export default function CommandCenterPage() {
   }, [incidentTimeline]);
 
   useEffect(() => {
-    if (useDemoMode) {
+    if(useDemoMode) {
       bootstrapDemoTenant();
     }
   }, [useDemoMode]);
 
   useEffect(() => {
     setSoarPolicy(null);
-    if (!accessToken || !tenantId) return;
+    if(!accessToken || !tenantId) return;
     fetchAlerts();
     fetchIncidents();
     fetchExecutiveStats();
@@ -220,7 +220,7 @@ export default function CommandCenterPage() {
     };
 
     const heartbeat = setInterval(() => {
-      if (ws.readyState === ws.OPEN) ws.send("ping");
+      if(ws.readyState === ws.OPEN) ws.send("ping");
     }, 4000);
 
     return () => {
@@ -245,7 +245,7 @@ export default function CommandCenterPage() {
       body: JSON.stringify({ email, password }),
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setLoginError(data?.detail || "Login failed");
       return;
     }
@@ -261,14 +261,14 @@ export default function CommandCenterPage() {
   }
 
   async function refreshAccess() {
-    if (!refreshToken || !tenantId) return;
+    if(!refreshToken || !tenantId) return;
     const res = await fetch(`${API}/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Tenant-ID": tenantId },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
     const data = await res.json();
-    if (data.access_token) setAccessToken(data.access_token);
+    if(data.access_token) setAccessToken(data.access_token);
   }
 
   async function fetchAlerts() {
@@ -282,14 +282,14 @@ export default function CommandCenterPage() {
     const data = await res.json();
     const rows = Array.isArray(data) ? data : [];
     setIncidents(rows);
-    if (!soarIncidentId && rows[0]?.id) {
+    if(!soarIncidentId && rows[0]?.id) {
       setSoarIncidentId(String(rows[0].id));
     }
   }
 
   async function automateIncidentNow() {
     const incidentId = Number.parseInt(String(soarIncidentId), 10);
-    if (!incidentId) {
+    if(!incidentId) {
       setToast({ type: "error", message: "Choose a valid incident id for SOAR automation" });
       return;
     }
@@ -299,7 +299,7 @@ export default function CommandCenterPage() {
         headers: authHeaders,
       });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "SOAR automation failed" });
         return;
       }
@@ -320,11 +320,11 @@ export default function CommandCenterPage() {
 
   async function loadSoarHistory(incidentOverride) {
     const incidentId = Number.parseInt(String(incidentOverride || soarIncidentId), 10);
-    if (!incidentId) return;
+    if(!incidentId) return;
     try {
       const res = await fetch(`${API}/soar/executions/${incidentId}`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) return;
+      if(!res.ok) return;
       setSoarExecutionHistory(Array.isArray(data?.executions) ? data.executions : []);
     } catch {
       // ignore
@@ -336,7 +336,7 @@ export default function CommandCenterPage() {
     try {
       const res = await fetch(`${API}/soar/policies`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setSoarPolicy(null);
         setToast({ type: "error", message: data?.detail || "Failed to load SOAR policy" });
         return;
@@ -350,11 +350,11 @@ export default function CommandCenterPage() {
 
   function updateSoarPolicy(path, value) {
     setSoarPolicy((prev) => {
-      if (!prev) return prev;
-      if (path.length === 1) {
+      if(!prev) return prev;
+      if(path.length === 1) {
         return { ...prev, [path[0]]: value };
       }
-      if (path.length === 3 && path[0] === "playbooks") {
+      if(path.length === 3 && path[0] === "playbooks") {
         const playbookName = path[1];
         const field = path[2];
         return {
@@ -373,7 +373,7 @@ export default function CommandCenterPage() {
   }
 
   async function saveSoarPolicy() {
-    if (!soarPolicy || soarPolicySaving) return;
+    if(!soarPolicy || soarPolicySaving) return;
     setSoarPolicySaving(true);
     try {
       const res = await fetch(`${API}/soar/policies`, {
@@ -400,7 +400,7 @@ export default function CommandCenterPage() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to save SOAR policy" });
         return;
       }
@@ -420,13 +420,13 @@ export default function CommandCenterPage() {
   }
   
   async function loadSoarAudit() {
-    if (soarAuditLoading) return;
+    if(soarAuditLoading) return;
     setSoarAuditLoading(true);
     try {
       const safe = Math.max(1, Math.min(Number.parseInt(soarAuditWindowDays || "30", 10) || 30, 90));
       const res = await fetch(`${API}/soar/audit?window_days=${safe}`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to load SOAR audit" });
         return;
       }
@@ -442,13 +442,13 @@ export default function CommandCenterPage() {
 
   async function loadIncidentTimeline(idOverride) {
     const id = Number.parseInt(String(idOverride || incidentTimelineId || soarIncidentId), 10);
-    if (!id) { setToast({ type: "error", message: "Select an incident ID to load timeline" }); return; }
+    if(!id) { setToast({ type: "error", message: "Select an incident ID to load timeline" }); return; }
     setIncidentTimelineLoading(true);
     setIncidentTimelineId(String(id));
     try {
       const res = await fetch(`${API}/incidents/${id}/timeline`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to load incident timeline" });
         return;
       }
@@ -462,13 +462,13 @@ export default function CommandCenterPage() {
   }
 
   async function loadSoarStats() {
-    if (soarStatsLoading) return;
+    if(soarStatsLoading) return;
     setSoarStatsLoading(true);
     try {
       const safe = Math.max(1, Math.min(Number.parseInt(soarAuditWindowDays || "30", 10) || 30, 90));
       const res = await fetch(`${API}/soar/stats?window_days=${safe}`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to load SOAR stats" });
         return;
       }
@@ -483,7 +483,7 @@ export default function CommandCenterPage() {
   // ── Voice Command System ────────────────────────────────────────
   function startVoiceListener() {
     const speech_recognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!speech_recognition)
+    if(!speech_recognition)
     {
       setToast({ type: "error", message: "WebSpeech API not supported in this browser" });
       return;
@@ -494,7 +494,7 @@ export default function CommandCenterPage() {
     recognition.lang = "en-US";
     recognition.onresult = async (event) => {
       const last_result = event.results[event.results.length - 1];
-      if (!last_result.isFinal) return;
+      if(!last_result.isFinal) return;
       const transcript = last_result[0].transcript.trim();
       setVoiceTranscript(transcript);
       const intent = deriveVoiceIntent(transcript);
@@ -513,7 +513,7 @@ export default function CommandCenterPage() {
           headers: authHeaders,
         });
         setVoiceResult(data);
-        if (data.status !== "unrecognized")
+        if(data.status !== "unrecognized")
         {
           setToast({ type: "success", message: `Voice: ${data.intent || data.command} → ${data.status}` });
           loadSoarPolicy();
@@ -539,13 +539,13 @@ export default function CommandCenterPage() {
   async function loadJitStatus() {
     try {
       const res = await fetch(`${API}/jit/status`, { headers: authHeaders });
-      if (res.ok) setJitStatus(await res.json());
+      if(res.ok) setJitStatus(await res.json());
     } catch { /* ignore */ }
   }
 
   // ── Ghost-Mode sync from policy ─────────────────────────────────
   useEffect(() => {
-    if (soarPolicy) setGhostModeEnabled(!!soarPolicy.ghost_mode);
+    if(soarPolicy) setGhostModeEnabled(!!soarPolicy.ghost_mode);
   }, [soarPolicy]);
 
 
@@ -570,7 +570,7 @@ export default function CommandCenterPage() {
   }
 
   async function blockIp() {
-    if (!incidents[0]) return;
+    if(!incidents[0]) return;
     await fetch(`${API}/respond/block-ip?ip=203.0.113.42&incident_id=${incidents[0].id}`, {
       method: "POST",
       headers: authHeaders,
@@ -604,7 +604,7 @@ export default function CommandCenterPage() {
         data = null;
       }
 
-      if (!res.ok) {
+      if(!res.ok) {
         const message = data?.detail || bodyText || "Simulation failed";
         setToast({ type: "error", message });
         return;
@@ -630,21 +630,21 @@ export default function CommandCenterPage() {
   }
 
   async function fetchScenarioCatalog() {
-    if (!accessToken || !tenantId) return;
+    if(!accessToken || !tenantId) return;
     const res = await fetch(`${API}/demo/scenarios`, { headers: authHeaders });
     const data = await res.json();
     setScenarioCatalog(Array.isArray(data?.scenarios) ? data.scenarios : []);
   }
 
   async function loadUebaAnalytics() {
-    if (analyticsLoading) return;
+    if(analyticsLoading) return;
     setAnalyticsError("");
     setAnalyticsLoading(true);
     try {
       const safeWindow = getSafeAnalyticsWindow();
       const res = await fetch(`${API}/analytics/ueba?window_days=${safeWindow}`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         const message = data?.detail || "Failed to load UEBA analytics";
         setAnalyticsError(message);
         setToast({ type: "error", message });
@@ -666,14 +666,14 @@ export default function CommandCenterPage() {
   }
 
   async function loadMlAnalytics() {
-    if (analyticsLoading) return;
+    if(analyticsLoading) return;
     setAnalyticsError("");
     setAnalyticsLoading(true);
     try {
       const safeWindow = getSafeAnalyticsWindow();
       const res = await fetch(`${API}/analytics/ml-anomalies?window_days=${safeWindow}`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         const message = data?.detail || "Failed to load ML anomalies";
         setAnalyticsError(message);
         setToast({ type: "error", message });
@@ -695,14 +695,14 @@ export default function CommandCenterPage() {
   }
 
   async function loadAdvancedAnalytics() {
-    if (analyticsLoading) return;
+    if(analyticsLoading) return;
     setAnalyticsError("");
     setAnalyticsLoading(true);
     try {
       const safeWindow = getSafeAnalyticsWindow();
       const res = await fetch(`${API}/analytics/advanced?window_days=${safeWindow}`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         const message = data?.detail || "Failed to load advanced analytics";
         setAnalyticsError(message);
         setToast({ type: "error", message });
@@ -729,7 +729,7 @@ export default function CommandCenterPage() {
     try {
       const res = await fetch(`${API}/demo/live/status`, { headers: authHeaders });
       const data = await res.json();
-      if (!res.ok) return;
+      if(!res.ok) return;
       setLiveSimulationStatus(data);
     } catch {
       // Status polling failure should not block command center usage.
@@ -741,7 +741,7 @@ export default function CommandCenterPage() {
   }
 
   async function loadExecutiveStory() {
-    if (storyLoading) return;
+    if(storyLoading) return;
     setStoryError("");
     setStoryLoading(true);
     try {
@@ -750,7 +750,7 @@ export default function CommandCenterPage() {
         headers: authHeaders,
       });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         const message = data?.detail || "Failed to load executive attack story";
         setStoryError(message);
         setToast({ type: "error", message });
@@ -776,7 +776,7 @@ export default function CommandCenterPage() {
         headers: authHeaders,
       });
       const body = await res.text();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: body || "Executive report export failed" });
         return;
       }
@@ -798,9 +798,9 @@ export default function CommandCenterPage() {
   }
 
   async function playExecutiveReplay() {
-    if (isReplaying) return;
+    if(isReplaying) return;
     const events = executiveStory?.timeline || [];
-    if (!events.length) {
+    if(!events.length) {
       setToast({ type: "error", message: "No timeline events available to replay" });
       return;
     }
@@ -825,7 +825,7 @@ export default function CommandCenterPage() {
         body: JSON.stringify({ rounds, include_noise: !!liveSimulationForm.include_noise }),
       });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to seed attack dataset" });
         return;
       }
@@ -848,7 +848,7 @@ export default function CommandCenterPage() {
         body: JSON.stringify({ interval_seconds: interval, include_noise: !!liveSimulationForm.include_noise }),
       });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to start live simulation" });
         return;
       }
@@ -866,7 +866,7 @@ export default function CommandCenterPage() {
         headers: authHeaders,
       });
       const data = await res.json();
-      if (!res.ok) {
+      if(!res.ok) {
         setToast({ type: "error", message: data?.detail || "Failed to stop live simulation" });
         return;
       }
@@ -878,13 +878,13 @@ export default function CommandCenterPage() {
   }
 
   useEffect(() => {
-    if (!toast) return;
+    if(!toast) return;
     const timer = setTimeout(() => setToast(null), 2800);
     return () => clearTimeout(timer);
   }, [toast]);
 
   useEffect(() => {
-    if (!accessToken || !tenantId) return;
+    if(!accessToken || !tenantId) return;
     const timer = setInterval(() => {
       loadLiveSimulationStatus();
     }, 15000);
@@ -899,7 +899,7 @@ export default function CommandCenterPage() {
       body: JSON.stringify({ admin_token: adminTokenInput }),
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Admin session failed");
       return;
     }
@@ -908,14 +908,14 @@ export default function CommandCenterPage() {
   }
 
   async function refreshAdminSession() {
-    if (!adminRefreshToken) return;
+    if(!adminRefreshToken) return;
     const res = await fetch(`${API}/admin/session/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: adminRefreshToken }),
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Admin refresh failed");
       return;
     }
@@ -924,7 +924,7 @@ export default function CommandCenterPage() {
   }
 
   async function revokeAdminSession() {
-    if (!adminRefreshToken) return;
+    if(!adminRefreshToken) return;
     await fetch(`${API}/admin/session/revoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -935,7 +935,7 @@ export default function CommandCenterPage() {
   }
 
   async function loadAdminData() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const headers = { Authorization: `Bearer ${adminAccessToken}` };
     const [leadsRes, funnelRes, webhookRes] = await Promise.all([
       fetch(`${API}/admin/leads?limit=25`, { headers }),
@@ -953,7 +953,7 @@ export default function CommandCenterPage() {
   }
 
   async function cleanupReplayFingerprints() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     await fetch(`${API}/admin/webhooks/cleanup`, {
       method: "POST",
       headers: { Authorization: `Bearer ${adminAccessToken}` },
@@ -972,13 +972,13 @@ export default function CommandCenterPage() {
   }
 
   async function loadBoardReport() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const { safeWindowDays, safeIncidentLimit, query } = buildBoardReportQuery();
     const res = await fetch(`${API}/admin/reports/board?${query}`, {
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Board report load failed");
       return;
     }
@@ -989,13 +989,13 @@ export default function CommandCenterPage() {
   }
 
   async function downloadBoardReport() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const { safeWindowDays, safeIncidentLimit, query } = buildBoardReportQuery();
     const res = await fetch(`${API}/admin/reports/board.md?${query}`, {
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const body = await res.text();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(body || "Board report download failed");
       return;
     }
@@ -1016,12 +1016,12 @@ export default function CommandCenterPage() {
   }
 
   async function loadReportSchedules() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules`, {
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to load schedules");
       return;
     }
@@ -1031,12 +1031,12 @@ export default function CommandCenterPage() {
   }
 
   async function loadScheduleSummary() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules/summary`, {
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       return;
     }
     setScheduleSummary({
@@ -1048,7 +1048,7 @@ export default function CommandCenterPage() {
   }
 
   async function createReportSchedule() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules`, {
       method: "POST",
       headers: {
@@ -1058,7 +1058,7 @@ export default function CommandCenterPage() {
       body: JSON.stringify(scheduleForm),
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to create schedule");
       return;
     }
@@ -1090,7 +1090,7 @@ export default function CommandCenterPage() {
   }
 
   async function updateReportSchedule() {
-    if (!adminAccessToken || !editingScheduleId) return;
+    if(!adminAccessToken || !editingScheduleId) return;
     const res = await fetch(`${API}/admin/reports/schedules/${editingScheduleId}`, {
       method: "PATCH",
       headers: {
@@ -1100,7 +1100,7 @@ export default function CommandCenterPage() {
       body: JSON.stringify(scheduleForm),
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to update schedule");
       return;
     }
@@ -1112,13 +1112,13 @@ export default function CommandCenterPage() {
   }
 
   async function runDueSchedulesNow() {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules/run-due`, {
       method: "POST",
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to run due schedules");
       return;
     }
@@ -1130,14 +1130,14 @@ export default function CommandCenterPage() {
   }
 
   async function deleteReportSchedule(scheduleId) {
-    if (!adminAccessToken) return;
-    if (!confirm("Delete this schedule?")) return;
+    if(!adminAccessToken) return;
+    if(!confirm("Delete this schedule?")) return;
     const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to delete schedule");
       return;
     }
@@ -1146,14 +1146,14 @@ export default function CommandCenterPage() {
   }
 
   async function toggleReportSchedule(scheduleId, currentEnabled) {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminAccessToken}` },
       body: JSON.stringify({ enabled: !currentEnabled }),
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to toggle schedule");
       return;
     }
@@ -1162,22 +1162,22 @@ export default function CommandCenterPage() {
   }
 
   async function runReportSchedule(scheduleId) {
-    if (!adminAccessToken) return;
+    if(!adminAccessToken) return;
     const res = await fetch(`${API}/admin/reports/schedules/${scheduleId}/run`, {
       method: "POST",
       headers: { Authorization: `Bearer ${adminAccessToken}` },
     });
     const data = await res.json();
-    if (!res.ok) {
+    if(!res.ok) {
       setAdminError(data?.detail || "Failed to run schedule");
       return;
     }
 
-    if (data?.report?.generated_at) {
+    if(data?.report?.generated_at) {
       setAdminBoardReport(data.report);
     }
 
-    if (data?.format === "markdown" && data?.content) {
+    if(data?.format === "markdown" && data?.content) {
       const blob = new Blob([data.content], { type: "text/markdown;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1190,7 +1190,7 @@ export default function CommandCenterPage() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
-    if (data?.format === "json" && data?.report) {
+    if(data?.format === "json" && data?.report) {
       const blob = new Blob([JSON.stringify(data.report, null, 2)], { type: "application/json;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -2122,8 +2122,9 @@ const miniTitle = {
 };
 
 function sev(s) {
-  if (s === "critical") return "#ef4444";
-  if (s === "high") return "#f97316";
-  if (s === "medium") return "#eab308";
+  if(s === "critical") return "#ef4444";
+  if(s === "high") return "#f97316";
+  if(s === "medium") return "#eab308";
   return "#22c55e";
 }
+
