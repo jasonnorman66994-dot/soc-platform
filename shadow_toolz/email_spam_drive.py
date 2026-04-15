@@ -9,11 +9,11 @@ import time
 from datetime import timedelta, timezone
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-import app as backend_app
+from backend import app as backend_app
 
 
 SPAM_TLDS = ["evil-spam.xyz", "promo-blast.biz", "phish-net.info", "bulk-mailer.click", "offer-now.top"]
@@ -47,16 +47,18 @@ def generate_email_events(
     count: int,
     rng: random.Random,
     burst: bool = True,
+    total_events: int | None = None,
+    time_spread_secs: int = 3600,
 ) -> list[tuple[str, str, str, str, str]]:
     """Generate email_received events with spam drive metadata."""
     now = backend_app.now_utc().astimezone(timezone.utc)
     records: list[tuple[str, str, str, str, str]] = []
+    burst_freq = total_events if total_events is not None else count
     for i in range(count):
         sender = _random_sender(rng, tld)
         reputation = _sender_reputation(rng, burst)
         link_count = _link_density(rng, burst)
-        burst_freq = count
-        ts = now - timedelta(seconds=rng.randint(0, 3500))
+        ts = now - timedelta(seconds=rng.randint(0, time_spread_secs))
         payload = {
             "sender": sender,
             "tld": tld,
@@ -78,6 +80,8 @@ def run_spam_drive(
     batch_size: int = 100,
     seed: int = 99,
     dry_run: bool = False,
+    time_spread_secs: int = 3600,
+    confirm: bool = False,
 ) -> dict:
     """Execute the spamming drive: insert high-velocity email events in batches."""
     rng = random.Random(seed)
@@ -86,7 +90,10 @@ def run_spam_drive(
     start = time.monotonic()
 
     if dry_run:
-        events = generate_email_events(tenant_id, target_user, tld, min(batch_size, total_events), rng, burst=True)
+        events = generate_email_events(
+            tenant_id, target_user, tld, min(batch_size, total_events), rng,
+            burst=True, total_events=total_events, time_spread_secs=time_spread_secs,
+        )
         return {
             "mode": "dry_run",
             "tenant_id": tenant_id,
@@ -96,12 +103,22 @@ def run_spam_drive(
             "sample": [json.loads(e[3]) for e in events[:3]],
         }
 
+    if not confirm:
+        raise SystemExit(
+            "Live mode requires --confirm flag to prevent accidental bulk inserts. "
+            "Use --dry-run to preview first."
+        )
+
     remaining = total_events
     with backend_app.get_conn() as conn:
-        while remaining > 0:
-            chunk = min(batch_size, remaining)
-            events = generate_email_events(tenant_id, target_user, tld, chunk, rng, burst=True)
-            with conn.cursor() as cur:
+        with conn.cursor() as cur:
+            while remaining > 0:
+                chunk = min(batch_size, remaining)
+                events = generate_email_events(
+                    tenant_id, target_user, tld, chunk, rng,
+                    burst=True, total_events=total_events,
+                    time_spread_secs=time_spread_secs,
+                )
                 cur.executemany(
                     """
                     INSERT INTO events (tenant_id, user_id, type, raw, timestamp)
@@ -109,10 +126,10 @@ def run_spam_drive(
                     """,
                     events,
                 )
-            conn.commit()
-            inserted += chunk
-            remaining -= chunk
-            batches += 1
+                conn.commit()
+                inserted += chunk
+                remaining -= chunk
+                batches += 1
 
     elapsed = round(time.monotonic() - start, 2)
     eps = round(inserted / elapsed, 1) if elapsed > 0 else 0
@@ -137,12 +154,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=100, help="Events per insert batch")
     parser.add_argument("--seed", type=int, default=99)
     parser.add_argument("--dry-run", action="store_true", help="Preview events without inserting")
+    parser.add_argument("--time-spread", type=int, default=3600, help="Seconds of back-spread for event timestamps (default: 3600)")
+    parser.add_argument("--confirm", action="store_true", help="Required for live mode to prevent accidental bulk inserts")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    tld = args.tld or random.choice(SPAM_TLDS)
+    tld = args.tld or random.Random(args.seed).choice(SPAM_TLDS)
     result = run_spam_drive(
         tenant_id=args.tenant_id,
         target_user=args.target_user,
@@ -151,6 +170,8 @@ def main() -> int:
         batch_size=args.batch_size,
         seed=args.seed,
         dry_run=args.dry_run,
+        time_spread_secs=args.time_spread,
+        confirm=args.confirm,
     )
     print(json.dumps(result, indent=2))
     return 0

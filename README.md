@@ -242,6 +242,39 @@ docker compose up --build
 - Frontend direct: <http://localhost:3000>
 - Backend direct: <http://localhost:8000>
 
+## Distributed Agent (Production Settings)
+
+Run the endpoint collector from [agents/soc_agent.py](agents/soc_agent.py):
+
+```bash
+cd agents
+python soc_agent.py \
+  --api-url https://your-soc.example.com/api \
+  --api-key YOUR_API_KEY \
+  --tenant-id YOUR_TENANT_ID \
+  --interval 15 \
+  --batch-size 250 \
+  --max-retries 4 \
+  --retry-base-delay 1.0 \
+  --retry-max-delay 16.0
+```
+
+Recommended production values:
+
+- `--batch-size 250`: improves throughput while keeping request payloads bounded.
+- `--max-retries 4`: tolerates transient API/network failures.
+- `--retry-base-delay 1.0`: starts retries quickly.
+- `--retry-max-delay 16.0`: caps exponential backoff.
+
+Equivalent environment variables are also supported:
+
+- `SOC_AGENT_BATCH_SIZE`
+- `SOC_AGENT_MAX_RETRIES`
+- `SOC_AGENT_RETRY_BASE_DELAY`
+- `SOC_AGENT_RETRY_MAX_DELAY`
+
+Note: Use the public API gateway URL for `--api-url` (for example `https://your-soc.example.com/api`) so requests route through NGINX to `/telemetry/ingest`.
+
 ## Demo Bootstrap (Tenant + Credentials + API Key)
 
 ```bash
