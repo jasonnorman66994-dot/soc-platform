@@ -4,10 +4,11 @@ import axios from "axios";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import Timeline from "../../components/Timeline";
+import { getApiBaseUrl, getWebSocketUrl } from "../../lib/runtimeConfig";
 import { replayTimeline } from "../../lib/timelineReplay";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
-const WS = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost/ws";
+const API = getApiBaseUrl();
+const WS = getWebSocketUrl("/ws");
 
 function getDefaultScheduleForm() {
   return {

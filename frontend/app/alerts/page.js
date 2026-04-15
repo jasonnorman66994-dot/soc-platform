@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import AlertFeed from "../../components/AlertFeed";
 import { connectSocSocket } from "../../lib/socket";
+import { getWebSocketUrl } from "../../lib/runtimeConfig";
 
-const SOC_WS = process.env.NEXT_PUBLIC_SOC_CORE_WS_URL || "ws://localhost:8000/ws/alerts";
+const SOC_WS = getWebSocketUrl("/ws/alerts");
 
 export default function AlertsPage() {
   const [records, setRecords] = useState([]);

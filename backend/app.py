@@ -1,8 +1,11 @@
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
 import asyncio
+import sys
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Header, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, ConfigDict, constr, model_validator
+from pydantic import BaseModel, Field, ConfigDict, StringConstraints, model_validator
 import json
 import os
 import hmac
@@ -12,14 +15,22 @@ import io
 import csv
 import math
 import re
-from pathlib import Path
-from typing import Literal, Any
+from typing import Literal, Any, Annotated, cast
 from uuid import uuid4
+
+BACKEND_DIR = Path(__file__).resolve().parent
+load_dotenv(BACKEND_DIR.parent / ".env")
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 import psycopg
 from psycopg.rows import dict_row
 import redis
 import yaml
+try:
+    import bcrypt as bcrypt_lib
+except Exception:
+    bcrypt_lib = None
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
@@ -139,7 +150,9 @@ def _severity_rank(level: str | None) -> int:
 
 
 def _max_severity(current: str | None, incoming: str | None) -> str:
-    return current if _severity_rank(current) >= _severity_rank(incoming) else (incoming or current or "low")
+    current_level = current or "low"
+    incoming_level = incoming or "low"
+    return current_level if _severity_rank(current_level) >= _severity_rank(incoming_level) else incoming_level
 
 
 def _calculate_risk_score(critical_alerts: int, high_alerts: int, total_alerts: int) -> int:
@@ -148,17 +161,28 @@ def _calculate_risk_score(critical_alerts: int, high_alerts: int, total_alerts: 
     return min(score, 100)
 
 
+def _as_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:  # noqa: BLE001
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _nested_json_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
+    nested = container.get(key)
+    return nested if isinstance(nested, dict) else {}
+
+
 def _normalize_intelligence_events(rows: list[dict]) -> list[dict]:
     normalized = []
     for row in rows:
-        raw = row.get("raw")
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:  # noqa: BLE001
-                raw = {}
-        raw = raw or {}
-        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        raw = _as_json_dict(row.get("raw"))
+        payload_raw = _nested_json_dict(raw, "raw")
         user = row.get("user_id") or "unknown-user"
         ip = raw.get("ip") or payload_raw.get("ip")
         geo = raw.get("from") or raw.get("location") or payload_raw.get("from") or payload_raw.get("location")
@@ -358,6 +382,8 @@ def _should_auto_respond(
     threshold = active_policy.get("default_risk_threshold", AUTO_RESPONSE_RISK_THRESHOLD)
     if isinstance(playbook_policy, dict) and isinstance(playbook_policy.get("min_risk"), int):
         threshold = playbook_policy.get("min_risk")
+    if not isinstance(threshold, int):
+        threshold = AUTO_RESPONSE_RISK_THRESHOLD
 
     # ML anomaly gate: if ml_risk_threshold is set and ML score is below it, halt execution
     ml_risk_threshold = None
@@ -566,14 +592,8 @@ def build_executive_attack_story_report(tenant_id: str, window_minutes: int = 18
     scenario_counts: dict[str, int] = {}
 
     for row in rows:
-        raw = row.get("raw")
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:  # noqa: BLE001
-                raw = {}
-        raw = raw or {}
-        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        raw = _as_json_dict(row.get("raw"))
+        payload_raw = _nested_json_dict(raw, "raw")
         event_type = row["type"]
         user = row.get("user_id") or "unknown-user"
         scenario = raw.get("scenario") or payload_raw.get("scenario")
@@ -704,6 +724,7 @@ def run_report_schedule_export(cur, schedule_id: int) -> dict:
 
 rdb = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 clients: list[dict] = []
+public_clients: list[WebSocket] = []
 RATE_LIMITS: dict[str, list[datetime]] = {}
 RULES_DIR = Path(__file__).parent / "rules"
 LIVE_SIMULATION_TASKS: dict[str, asyncio.Task] = {}
@@ -719,12 +740,18 @@ VALID_REPORT_SCHEDULE_FREQUENCIES = {"daily", "weekly", "monthly"}
 VALID_PLAYBOOK_TYPES = {"account_takeover", "suspicious_ip", "phishing", "data_exfiltration", "generic_alert"}
 ADMIN_SESSION_ALG = "HS256"
 SECURITY_WARNINGS: list[str] = []
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+TrimmedEmail = Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=255)]
+BoundPassword = Annotated[str, StringConstraints(min_length=8, max_length=128)]
+CompanyName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+ShortLabel = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
+PagePath = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 class LoginBody(BaseModel):
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    password: constr(min_length=8, max_length=128)
+    email: TrimmedEmail
+    password: BoundPassword
 
 
 class RefreshBody(BaseModel):
@@ -734,15 +761,15 @@ class RefreshBody(BaseModel):
 class SignupBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    company: constr(strip_whitespace=True, min_length=2, max_length=120)
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    password: constr(min_length=8, max_length=128)
+    company: CompanyName
+    email: TrimmedEmail
+    password: BoundPassword
     plan: str = "free"
 
 
 class CreateUserBody(BaseModel):
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    password: constr(min_length=8, max_length=128)
+    email: TrimmedEmail
+    password: BoundPassword
     role: str = Field(pattern="^(admin|analyst|viewer)$")
 
 
@@ -802,9 +829,9 @@ class LiveSimulationBody(BaseModel):
 class WaitlistLeadBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    company: constr(strip_whitespace=True, min_length=2, max_length=120)
-    email: constr(strip_whitespace=True, min_length=6, max_length=255)
-    role: constr(strip_whitespace=True, min_length=2, max_length=120) = "security_lead"
+    company: CompanyName
+    email: TrimmedEmail
+    role: CompanyName = "security_lead"
     source: str = "landing"
 
 
@@ -816,8 +843,8 @@ class TenantSubscriptionBody(BaseModel):
 class AnalyticsEventBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    event_name: constr(strip_whitespace=True, min_length=2, max_length=80)
-    page: constr(strip_whitespace=True, min_length=1, max_length=200) = "/"
+    event_name: ShortLabel
+    page: PagePath = "/"
     meta: dict | None = None
 
 
@@ -1514,14 +1541,21 @@ def _normalize_soar_policy(raw_policy: dict | str | None) -> dict:
         ml_risk_threshold = default["ml_risk_threshold"]
     ml_risk_threshold = max(0.0, min(float(ml_risk_threshold), 100.0))
 
-    playbooks_in = candidate.get("playbooks") if isinstance(candidate.get("playbooks"), dict) else {}
+    playbooks_in: dict[str, Any] = candidate["playbooks"] if isinstance(candidate.get("playbooks"), dict) else {}
     playbooks = {}
     for name, base in default["playbooks"].items():
-        requested = playbooks_in.get(name) if isinstance(playbooks_in.get(name), dict) else {}
+        requested_raw = playbooks_in.get(name)
+        requested: dict[str, Any] = requested_raw if isinstance(requested_raw, dict) else {}
         enabled = requested.get("enabled") if isinstance(requested.get("enabled"), bool) else base["enabled"]
-        min_risk = requested.get("min_risk") if isinstance(requested.get("min_risk"), int) else base["min_risk"]
-        pb_ml_thresh = requested.get("ml_risk_threshold") if isinstance(requested.get("ml_risk_threshold"), (int, float)) else base.get("ml_risk_threshold", ml_risk_threshold)
-        pb_deception = requested.get("deception_enabled") if isinstance(requested.get("deception_enabled"), bool) else base.get("deception_enabled", False)
+        requested_min_risk = requested.get("min_risk")
+        min_risk = int(requested_min_risk) if isinstance(requested_min_risk, int) else int(base["min_risk"])
+        requested_ml_threshold = requested.get("ml_risk_threshold")
+        pb_ml_thresh = (
+            float(requested_ml_threshold)
+            if isinstance(requested_ml_threshold, (int, float))
+            else float(base.get("ml_risk_threshold", ml_risk_threshold))
+        )
+        pb_deception = requested.get("deception_enabled") if isinstance(requested.get("deception_enabled"), bool) else bool(base.get("deception_enabled", False))
         playbooks[name] = {
             "enabled": enabled,
             "min_risk": max(0, min(min_risk, 100)),
@@ -1707,11 +1741,18 @@ def hash_password(plain_password: str) -> str:
 
 
 def is_password_hash(value: str) -> bool:
-    return value.startswith("$2")
+    return value.startswith("$2") or value.startswith("$pbkdf2-sha256$")
 
 
 def verify_password(plain_password: str, stored_password: str) -> bool:
-    if is_password_hash(stored_password):
+    if stored_password.startswith("$2"):
+        if bcrypt_lib is None:
+            return False
+        try:
+            return bool(bcrypt_lib.checkpw(plain_password.encode("utf-8"), stored_password.encode("utf-8")))
+        except ValueError:
+            return False
+    if stored_password.startswith("$pbkdf2-sha256$"):
         return pwd_context.verify(plain_password, stored_password)
     return plain_password == stored_password
 
@@ -1735,7 +1776,7 @@ def enforce_security_policy():
 
 
 def get_conn():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    return cast(Any, psycopg.connect(DATABASE_URL, row_factory=cast(Any, dict_row)))
 
 
 def init_db():
@@ -2230,7 +2271,7 @@ async def security_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-_scheduler: "BackgroundScheduler | None" = None
+_scheduler: Any = None
 
 
 def execute_due_report_schedules() -> dict:
@@ -2418,7 +2459,10 @@ def revoke_admin(body: AdminSessionRevokeBody):
     claims = verify_admin_session_token(body.refresh_token, token_type="admin_refresh")
     if not claims:
         raise HTTPException(status_code=401, detail="Invalid admin refresh token")
-    revoke_admin_session(claims.get("jti"))
+    jti = claims.get("jti")
+    if not isinstance(jti, str) or not jti:
+        raise HTTPException(status_code=401, detail="Invalid admin refresh token")
+    revoke_admin_session(jti)
     return {"revoked": True}
 
 
@@ -2776,11 +2820,30 @@ async def _live_simulation_worker(tenant_id: str) -> None:
         scenario = scenarios[cursor % len(scenarios)]
         cursor += 1
 
+        scenario_value = cast(
+            Literal[
+            "credential_compromise_chain",
+            "impossible_travel_burst",
+            "insider_data_exfiltration",
+            "password_spray_wave",
+            "suspicious_oauth_app",
+            "powershell_execution_chain",
+            ],
+            scenario if scenario in {
+                "credential_compromise_chain",
+                "impossible_travel_burst",
+                "insider_data_exfiltration",
+                "password_spray_wave",
+                "suspicious_oauth_app",
+                "powershell_execution_chain",
+            } else "credential_compromise_chain",
+        )
+
         body = AdminDemoBody(
             user_id="demo.user",
             source_country="UK",
             destination_country="US",
-            scenario=scenario,
+            scenario=scenario_value,
             iterations=1,
             include_noise=bool(state.get("include_noise", True)),
             dry_run=False,
@@ -3337,7 +3400,7 @@ async def ingest(event: IngestEvent, tenant_id: str = Depends(get_tenant), _key=
                 if claimed_for_response:
                     incident_row["status"] = "responding"
 
-            if claimed_for_response:
+            if claimed_for_response and incident_row:
                 incident_payload, event_payload = _build_playbook_inputs(
                     incident_row,
                     payload,
@@ -3474,8 +3537,8 @@ def get_events(
                 raw = json.loads(raw)
             except Exception:  # noqa: BLE001
                 raw = {}
-        raw = raw or {}
-        payload_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        raw = _as_json_dict(raw)
+        payload_raw = _nested_json_dict(raw, "raw")
         normalized.append(
             {
                 "id": row["id"],
@@ -4810,7 +4873,7 @@ def update_incident_status_endpoint(
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE incidents SET status=%s, updated_at=NOW() WHERE id=%s AND tenant_id=%s",
+                "UPDATE incidents SET status=%s, last_seen=NOW() WHERE id=%s AND tenant_id=%s",
                 (new_status, incident_id, tenant_id),
             )
         conn.commit()
@@ -4820,7 +4883,7 @@ def update_incident_status_endpoint(
         incident_id,
         action="status_changed",
         description=f"Status changed to {new_status}: {reason}",
-        actor=user.get("id") if user else None,
+        actor=cast(Any, user.get("id") if user else None),
         details={"previous_status": "unknown", "new_status": new_status},
     )
     
@@ -4848,7 +4911,7 @@ def add_incident_note(
     note_entry = add_analyst_note(
         incident_id=incident_id,
         note=note,
-        analyst_id=user.get("id") if user else None,
+        analyst_id=cast(Any, user.get("id") if user else None),
         tags=tags,
     )
 
@@ -5168,7 +5231,7 @@ def close_incident_endpoint(
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE incidents SET status=%s, responded_at=NOW(), updated_at=NOW() WHERE id=%s AND tenant_id=%s",
+                "UPDATE incidents SET status=%s, responded_at=NOW(), last_seen=NOW() WHERE id=%s AND tenant_id=%s",
                 ("closed", incident_id, tenant_id),
             )
         conn.commit()
@@ -6185,8 +6248,21 @@ async def websocket_endpoint(ws: WebSocket):
                 clients.remove(item)
 
 
+@app.websocket("/ws/alerts")
+async def websocket_alerts_endpoint(ws: WebSocket):
+    await ws.accept()
+    public_clients.append(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        if ws in public_clients:
+            public_clients.remove(ws)
+
+
 async def broadcast(tenant_id: str, alert: dict):
     stale = []
+    public_stale: list[WebSocket] = []
     for c in clients:
         if c["tenant_id"] != tenant_id:
             continue
@@ -6194,17 +6270,25 @@ async def broadcast(tenant_id: str, alert: dict):
             await c["ws"].send_json(alert)
         except Exception:
             stale.append(c)
+    for ws in public_clients:
+        try:
+            await ws.send_json(alert)
+        except Exception:
+            public_stale.append(ws)
     for c in stale:
         if c in clients:
             clients.remove(c)
+    for ws in public_stale:
+        if ws in public_clients:
+            public_clients.remove(ws)
 
 
 def _run_response(tenant_id: str, action: str, target: str, incident_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE incidents SET status=%s, responded_at=NOW() WHERE id=%s AND tenant_id=%s",
-                ("contained", incident_id, tenant_id),
+                "UPDATE incidents SET status=%s, responded_at=NOW(), last_seen=NOW() WHERE id=%s AND tenant_id=%s",
+                ("responded", incident_id, tenant_id),
             )
             cur.execute(
                 "UPDATE alerts SET responded_at=NOW() WHERE event_id IN (SELECT id FROM events WHERE tenant_id=%s)",

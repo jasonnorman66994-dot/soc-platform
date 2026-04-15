@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { getApiBaseUrl } from "../../lib/runtimeConfig";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
+const API = getApiBaseUrl();
 const MAX_THREAT_INDICATORS = 120;
 const ANIMATED_THREAT_INDICATORS = 60;
 

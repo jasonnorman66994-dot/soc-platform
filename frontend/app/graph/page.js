@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import AttackGraph from "../../components/AttackGraph";
+import { getApiBaseUrl } from "../../lib/runtimeConfig";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost/api";
+const API = getApiBaseUrl();
 
 function scoreColor(score) {
   if (score >= 85) return "#ef4444";

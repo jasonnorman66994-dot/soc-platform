@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Timeline from "../../components/Timeline";
+import { getApiBaseUrl } from "../../lib/runtimeConfig";
 
-const SOC_API = process.env.NEXT_PUBLIC_SOC_CORE_API_URL || "http://localhost:8000";
+const SOC_API = getApiBaseUrl();
 
 export default function TimelinePage() {
   const [events, setEvents] = useState([]);

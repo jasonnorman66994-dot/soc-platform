@@ -7,10 +7,11 @@ import axios from "axios";
 import AlertFeed from "../../components/AlertFeed";
 import AttackGraph from "../../components/AttackGraph";
 import Timeline from "../../components/Timeline";
+import { getApiBaseUrl, getWebSocketUrl } from "../../lib/runtimeConfig";
 import { connectSocSocket } from "../../lib/socket";
 
-const SOC_API = process.env.NEXT_PUBLIC_SOC_CORE_API_URL || "http://localhost:8000";
-const SOC_WS = process.env.NEXT_PUBLIC_SOC_CORE_WS_URL || "ws://localhost:8000/ws/alerts";
+const SOC_API = getApiBaseUrl();
+const SOC_WS = getWebSocketUrl("/ws/alerts");
 
 function buildGraphData(records) {
   const nodes = [];
