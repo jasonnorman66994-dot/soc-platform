@@ -13,6 +13,8 @@ Pattern: Replace print() with actual provider SDK
 import os
 import json
 from datetime import datetime, timezone
+import urllib.error
+import urllib.request
 
 
 def send_alert(recipient: str, title: str, message: str, severity: str = "medium") -> dict:
@@ -143,24 +145,67 @@ def send_to_siem(event_type: str, data: dict) -> dict:
 
 def send_webhook(url: str, data: dict, headers: dict = None) -> dict:
     """Send custom webhook notification."""
-    # TODO: Replace with actual HTTP client
-    # Example:
-    # import requests
-    # requests.post(url, json=data, headers=headers or {})
-    
     if not url:
         return {
             "status": "error",
             "action": "send_webhook",
             "message": "No webhook URL provided",
         }
-    
+
+    try:
+        body = json.dumps(data).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "error",
+            "action": "send_webhook",
+            "url": url,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": f"Webhook payload is not JSON serializable: {exc}",
+        }
+
+    req_headers = {"Content-Type": "application/json"}
+    if headers:
+        req_headers.update(headers)
+
+    try:
+        request = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "action": "send_webhook",
+            "url": url,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": f"Webhook URL is invalid: {exc}",
+        }
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status_code = response.status
+    except urllib.error.HTTPError as exc:
+        return {
+            "status": "error",
+            "action": "send_webhook",
+            "url": url,
+            "http_status": exc.code,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": f"Webhook HTTP error {exc.code}: {exc.reason}",
+        }
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {
+            "status": "error",
+            "action": "send_webhook",
+            "url": url,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": f"Webhook delivery failed: {exc}",
+        }
+
     return {
         "status": "success",
         "action": "send_webhook",
         "url": url,
+        "http_status": status_code,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "message": f"Webhook sent to {url}",
+        "message": f"Webhook delivered to {url} (HTTP {status_code})",
     }
 
 
