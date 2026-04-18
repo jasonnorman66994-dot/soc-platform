@@ -151,13 +151,33 @@ def send_webhook(url: str, data: dict, headers: dict = None) -> dict:
             "action": "send_webhook",
             "message": "No webhook URL provided",
         }
-    
-    body = json.dumps(data).encode("utf-8")
+
+    try:
+        body = json.dumps(data).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "error",
+            "action": "send_webhook",
+            "url": url,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": f"Webhook payload is not JSON serializable: {exc}",
+        }
+
     req_headers = {"Content-Type": "application/json"}
     if headers:
         req_headers.update(headers)
 
-    request = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    try:
+        request = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "action": "send_webhook",
+            "url": url,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": f"Webhook URL is invalid: {exc}",
+        }
+
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             status_code = response.status
@@ -170,7 +190,7 @@ def send_webhook(url: str, data: dict, headers: dict = None) -> dict:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "message": f"Webhook HTTP error {exc.code}: {exc.reason}",
         }
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, OSError, ValueError) as exc:
         return {
             "status": "error",
             "action": "send_webhook",

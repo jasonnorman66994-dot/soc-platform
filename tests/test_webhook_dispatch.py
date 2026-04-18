@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # Allow importing backend modules without a full FastAPI startup
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+_BACKEND_PATH = os.path.join(os.path.dirname(__file__), "..", "backend")
+if _BACKEND_PATH not in sys.path:
+    sys.path.insert(0, _BACKEND_PATH)
 
 from integrations.messaging import send_webhook
 
@@ -102,6 +104,16 @@ class TestSendWebhookErrors(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("failed", result["message"])
+
+    def test_invalid_url_returns_error_status(self):
+        result = send_webhook("not-a-url", {})
+        self.assertEqual(result["status"], "error")
+        self.assertIn("invalid", result["message"].lower())
+
+    def test_non_serializable_payload_returns_error(self):
+        result = send_webhook("https://example.com/hook", {"bad": {1, 2, 3}})
+        self.assertEqual(result["status"], "error")
+        self.assertIn("not json serializable", result["message"].lower())
 
 
 if __name__ == "__main__":

@@ -2,10 +2,12 @@ from typing import Any
 
 
 import os
+from functools import lru_cache
 
 _DEFAULT_ALLOWED_LOCATIONS = "US,GB,CA,AU,DE,FR,NL,JP,SG,NG"
 
 
+@lru_cache(maxsize=1)
 def _allowed_locations() -> frozenset[str]:
     """Return the set of expected country codes (ISO 3166-1 alpha-2).
 
@@ -22,6 +24,8 @@ def detect(event: Any) -> list[dict]:
     event_type = event.get("event_type") if isinstance(event, dict) else getattr(event, "event_type", None)
     ip = event.get("ip") if isinstance(event, dict) else getattr(event, "ip", None)
     location = event.get("location") if isinstance(event, dict) else getattr(event, "location", None)
+    if isinstance(location, str):
+        location = location.strip().upper()
 
     alerts: list[dict] = []
 

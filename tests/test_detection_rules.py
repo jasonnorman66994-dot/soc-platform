@@ -5,31 +5,11 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+_BACKEND_PATH = os.path.join(os.path.dirname(__file__), "..", "backend")
+if _BACKEND_PATH not in sys.path:
+    sys.path.insert(0, _BACKEND_PATH)
 
 import importlib
-
-
-def _reload_rules(env: dict | None = None):
-    """Reload detection.rules with a clean env so _allowed_locations() is re-evaluated."""
-    import detection.rules as mod
-
-    old_env = {k: os.environ.get(k) for k in (env or {})}
-    try:
-        for k, v in (env or {}).items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        importlib.reload(mod)
-        return mod
-    finally:
-        for k, v in old_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        importlib.reload(mod)
 
 
 class TestDetectGeoDefault(unittest.TestCase):
@@ -56,6 +36,12 @@ class TestDetectGeoDefault(unittest.TestCase):
         alerts = self.rules.detect(event)
         types = [a["type"] for a in alerts]
         self.assertIn("impossible_travel", types)
+
+    def test_location_is_normalized_before_check(self):
+        event = {"event_type": "login_success", "location": " us ", "ip": "1.2.3.4"}
+        alerts = self.rules.detect(event)
+        types = [a["type"] for a in alerts]
+        self.assertNotIn("impossible_travel", types)
 
     def test_gb_no_impossible_travel_default(self):
         """GB is in the default allowlist."""
